@@ -41,6 +41,13 @@ const useCalendarStore = create((set, get) => ({
     set({ viewMode: mode });
   },
 
+  lastSelectedCategoryId: localStorage.getItem('calendarLastCategoryId') || '',
+  setLastSelectedCategoryId: (categoryId) => {
+    const val = categoryId || '';
+    localStorage.setItem('calendarLastCategoryId', val);
+    set({ lastSelectedCategoryId: val });
+  },
+
   fetchCategories: async () => {
     try {
       const response = await fetch(`${API_URL}/calendar/categories`, {
@@ -78,7 +85,16 @@ const useCalendarStore = create((set, get) => ({
         headers: getHeaders(),
       });
       if (!response.ok) throw new Error('Failed to delete category');
-      set((state) => ({ categories: state.categories.filter((c) => c.id !== id) }));
+      set((state) => {
+        const isDeletedLastSelected = state.lastSelectedCategoryId === id;
+        if (isDeletedLastSelected) {
+          localStorage.setItem('calendarLastCategoryId', '');
+        }
+        return {
+          categories: state.categories.filter((c) => c.id !== id),
+          lastSelectedCategoryId: isDeletedLastSelected ? '' : state.lastSelectedCategoryId,
+        };
+      });
     } catch (error) {
       console.error('Error deleting calendar category:', error);
       throw error;

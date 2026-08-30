@@ -14,6 +14,7 @@ import usePageTitle from '../hooks/usePageTitle';
 import useTaskStore from '../store/useTaskStore';
 import useSettingsStore from '../store/useSettingsStore';
 import useAppStore from '../store/useAppStore';
+import QuickTaskInput from '../components/QuickTaskInput';
 import { Link, useSearchParams } from 'react-router-dom';
 
 export default function Dashboard() {
@@ -26,11 +27,6 @@ export default function Dashboard() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const { addThought } = useThoughtsStore();
-
-  // Task store
-  const { createTask } = useTaskStore();
-  const [quickTaskTitle, setQuickTaskTitle] = useState('');
-  const [isSubmittingTask, setIsSubmittingTask] = useState(false);
 
   // Finance store
   const { 
@@ -145,18 +141,6 @@ export default function Dashboard() {
       setContent('');
     }
     setIsSubmitting(false);
-  };
-
-  const handleQuickTask = async (e) => {
-    e.preventDefault();
-    if (!quickTaskTitle.trim()) return;
-    
-    setIsSubmittingTask(true);
-    const success = await createTask({ title: quickTaskTitle.trim(), status: 0, isNew: true });
-    if (success) {
-      setQuickTaskTitle('');
-    }
-    setIsSubmittingTask(false);
   };
 
   const handleLogSpend = async (e) => {
@@ -327,27 +311,11 @@ export default function Dashboard() {
           {/* Quick Task Widget */}
           {features.tasks && (
             <div className="bg-white dark:bg-slate-800 p-6 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 dark:text-slate-100">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-300">Quick Task</h3>
-              <a href="/tasks" className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 font-medium">All Tasks →</a>
-            </div>
-            <form onSubmit={handleQuickTask} className="flex flex-col gap-3">
-              <input 
-                type="text"
-                value={quickTaskTitle}
-                onChange={(e) => setQuickTaskTitle(e.target.value)}
-                className="w-full border border-slate-300 dark:border-slate-600 p-3 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none dark:bg-slate-700 dark:text-slate-100"
-                placeholder="What needs to be done?"
-                disabled={isSubmittingTask}
-              />
-              <button 
-                type="submit" 
-                disabled={isSubmittingTask || !quickTaskTitle.trim()}
-                className="self-end bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isSubmittingTask ? 'Adding...' : 'Add Task'}
-              </button>
-            </form>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-300">Quick Task</h3>
+                <a href="/tasks" className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 font-medium">All Tasks →</a>
+              </div>
+              <QuickTaskInput />
             </div>
           )}
 

@@ -1,12 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { X, Trash2, Calendar as CalendarIcon, Clock, Repeat, Tag, AlignLeft, Bell, Plus } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
+import { useState, useEffect } from 'react';
+import { X, Trash2, Calendar as CalendarIcon, Repeat, Tag, AlignLeft, Bell, Plus } from 'lucide-react';
+import { format } from 'date-fns';
 import useCalendarStore from '../../store/useCalendarStore';
 import useUIStore from '../../store/useUIStore';
 import ConfirmModal from '../common/ConfirmModal';
 
 export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }) {
-  const { createEvent, updateEvent, deleteEvent, categories, createCategory } = useCalendarStore();
+  const { 
+    createEvent, updateEvent, deleteEvent, categories, createCategory,
+    lastSelectedCategoryId, setLastSelectedCategoryId 
+  } = useCalendarStore();
   const isOffline = useUIStore(state => state.isOffline);
   
   const [title, setTitle] = useState('');
@@ -16,7 +19,10 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
   const [endDate, setEndDate] = useState('');
   const [endTime, setEndTime] = useState('10:00');
   const [isAllDay, setIsAllDay] = useState(false);
-  const [categoryId, setCategoryId] = useState('');
+  const [categoryId, setCategoryId] = useState(() => {
+    if (eventToEdit) return eventToEdit.categoryId || '';
+    return lastSelectedCategoryId || '';
+  });
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurrenceType, setRecurrenceType] = useState('daily');
   const [recurrenceInterval, setRecurrenceInterval] = useState(1);
@@ -34,6 +40,7 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
     try {
       const cat = await createCategory({ name: newCatName, colorCode: newCatColor });
       setCategoryId(cat.id);
+      setLastSelectedCategoryId(cat.id);
       setIsCreatingCategory(false);
       setNewCatName('');
     } catch(e) {
@@ -42,6 +49,15 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
       setIsSavingCat(false);
     }
   };
+
+  useEffect(() => {
+    if (!eventToEdit && lastSelectedCategoryId && categories.length > 0) {
+      if (!categories.some(c => c.id === lastSelectedCategoryId)) {
+        setCategoryId('');
+        setLastSelectedCategoryId('');
+      }
+    }
+  }, [categories, eventToEdit, lastSelectedCategoryId, setLastSelectedCategoryId]);
 
   useEffect(() => {
     if (eventToEdit) {
@@ -61,29 +77,40 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
           const rule = JSON.parse(eventToEdit.recurrenceRule);
           setRecurrenceType(rule.type || 'daily');
           setRecurrenceInterval(rule.interval || 1);
-        } catch(e) {}
+        } catch {
+          // ignore invalid json rule
+        }
       }
       setNotificationPreference(eventToEdit.notificationPreference != null ? String(eventToEdit.notificationPreference) : '');
-    } else if (initialDate) {
-      const isRange = initialDate && initialDate.start && initialDate.end;
-      const sDate = isRange ? new Date(initialDate.start) : new Date(initialDate);
-      const eDate = isRange ? new Date(initialDate.end) : new Date(initialDate);
-      
-      setStartDate(format(sDate, 'yyyy-MM-dd'));
-      setEndDate(format(eDate, 'yyyy-MM-dd'));
-      
-      setStartTime(format(sDate, 'HH:mm'));
-      
-      if (!isRange) {
-        eDate.setHours(eDate.getHours() + 1);
-      }
-      setEndTime(format(eDate, 'HH:mm'));
     } else {
-      const now = new Date();
-      setStartDate(format(now, 'yyyy-MM-dd'));
-      setEndDate(format(now, 'yyyy-MM-dd'));
+      setTitle('');
+      setDescription('');
+      setIsAllDay(false);
+      setIsRecurring(false);
+      setNotificationPreference('');
+      setCategoryId(lastSelectedCategoryId || '');
+
+      if (initialDate) {
+        const isRange = initialDate && initialDate.start && initialDate.end;
+        const sDate = isRange ? new Date(initialDate.start) : new Date(initialDate);
+        const eDate = isRange ? new Date(initialDate.end) : new Date(initialDate);
+        
+        setStartDate(format(sDate, 'yyyy-MM-dd'));
+        setEndDate(format(eDate, 'yyyy-MM-dd'));
+        
+        setStartTime(format(sDate, 'HH:mm'));
+        
+        if (!isRange) {
+          eDate.setHours(eDate.getHours() + 1);
+        }
+        setEndTime(format(eDate, 'HH:mm'));
+      } else {
+        const now = new Date();
+        setStartDate(format(now, 'yyyy-MM-dd'));
+        setEndDate(format(now, 'yyyy-MM-dd'));
+      }
     }
-  }, [eventToEdit, initialDate]);
+  }, [eventToEdit, initialDate, lastSelectedCategoryId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -130,6 +157,7 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
       await updateEvent(eventToEdit.id, eventData);
     } else {
       await createEvent(eventData);
+      setLastSelectedCategoryId(categoryId || '');
     }
 
     onClose();
@@ -147,17 +175,6 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
     const eDateTime = isAllDay ? new Date(`${endDate}T23:59:59`) : new Date(`${endDate}T${endTime}`);
     return eDateTime >= sDateTime;
   };
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
 
   const isDateValid = isValidDateRange();
 
@@ -330,7 +347,11 @@ export default function EventModal({ isOpen, onClose, eventToEdit, initialDate }
               <div className="flex-1 flex items-center gap-2">
                 <select 
                   value={categoryId} 
-                  onChange={(e) => setCategoryId(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setCategoryId(val);
+                    setLastSelectedCategoryId(val);
+                  }}
                   className="flex-1 p-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded text-sm"
                 >
                   <option value="">No Category</option>
