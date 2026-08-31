@@ -108,14 +108,41 @@ public static class FinanceEndpoints
         return Results.Created($"/api/finances/transactions/{transaction.Id}", transaction);
     }
 
-    public static async Task<IResult> UpdateTransaction(SanadDbContext db, Guid id, Transaction updated)
+    public static async Task<IResult> UpdateTransaction(SanadDbContext db, Guid id, UpdateTransactionRequest updated)
     {
-        var transaction = await db.Transactions.FindAsync(id);
+        var transaction = await db.Transactions.Include(t => t.Category).FirstOrDefaultAsync(t => t.Id == id);
         if (transaction is null) return Results.NotFound();
 
-        transaction.Amount = updated.Amount;
-        // Depending on requirements, we might want to update Date, Description, CategoryId, or Type,
-        // but for now, we just update the Amount as requested by the user.
+        if (updated.Amount.HasValue)
+        {
+            transaction.Amount = updated.Amount.Value;
+        }
+
+        if (updated.Description != null)
+        {
+            transaction.Description = updated.Description;
+        }
+
+        if (updated.CategoryId.HasValue && updated.CategoryId.Value != Guid.Empty)
+        {
+            var category = await db.TransactionCategories.FindAsync(updated.CategoryId.Value);
+            if (category == null)
+            {
+                return Results.BadRequest("Category not found");
+            }
+            transaction.CategoryId = updated.CategoryId.Value;
+            transaction.Category = category;
+        }
+
+        if (updated.Date.HasValue)
+        {
+            transaction.Date = updated.Date.Value;
+        }
+
+        if (!string.IsNullOrEmpty(updated.Type))
+        {
+            transaction.Type = updated.Type;
+        }
 
         await db.SaveChangesAsync();
         return Results.Ok(transaction);
@@ -302,3 +329,4 @@ public static class FinanceEndpoints
 }
 
 public record MonthlyBudgetRequest(decimal Amount, int? Month, int? Year);
+public record UpdateTransactionRequest(decimal? Amount, string? Description, Guid? CategoryId, DateTime? Date, string? Type);

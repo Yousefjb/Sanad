@@ -6,11 +6,13 @@ import { timeAgo } from '../utils/dateUtils';
 import AssetsTab from './AssetsTab';
 import useFinanceStore from '../store/useFinanceStore';
 import useConfirmStore from '../store/useConfirmStore';
+import useUIStore from '../store/useUIStore';
 import CategorySelector from '../components/CategorySelector';
 import usePageTitle from '../hooks/usePageTitle';
 
 export default function FinanceDashboard() {
   usePageTitle('Finance');
+  const isOffline = useUIStore(state => state.isOffline);
   const [activeTab, setActiveTab] = useState('spending'); // 'spending' | 'assets'
   
   const [searchParams, setSearchParams] = useSearchParams();
@@ -102,6 +104,58 @@ export default function FinanceDashboard() {
       setEditingTxId(null);
     }
   };
+
+  // inline transaction description editing state (desktop only)
+  const [editingTxDescId, setEditingTxDescId] = useState(null);
+  const [editingTxDescValue, setEditingTxDescValue] = useState('');
+
+  const handleSaveTxDesc = async (tx) => {
+    const trimmed = editingTxDescValue.trim();
+    if (trimmed === (tx.description || '')) {
+      setEditingTxDescId(null);
+      return;
+    }
+    const success = await updateTransaction(tx.id, { description: trimmed });
+    if (success) {
+      setEditingTxDescId(null);
+    }
+  };
+
+  const handleStartEditDesc = (tx) => {
+    if (isOffline) return;
+    if (window.innerWidth < 768) return; // Desktop only
+    setEditingTxDescId(tx.id);
+    setEditingTxDescValue(tx.description || '');
+  };
+
+  // inline transaction category popover state
+  const [openCategoryTxId, setOpenCategoryTxId] = useState(null);
+  const [categorySearch, setCategorySearch] = useState('');
+
+  useEffect(() => {
+    if (!openCategoryTxId) return;
+
+    const handleClickOutside = (e) => {
+      if (!e.target.closest('[data-category-popover]')) {
+        setOpenCategoryTxId(null);
+        setCategorySearch('');
+      }
+    };
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setOpenCategoryTxId(null);
+        setCategorySearch('');
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [openCategoryTxId]);
 
   // category editing state
   const [editingCatId, setEditingCatId] = useState(null);
@@ -532,13 +586,137 @@ export default function FinanceDashboard() {
                     } dark:text-slate-100`}
                   >
                     <div className="flex items-center gap-3 flex-1 min-w-0">
-                      <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: tx.category?.colorHex || '#CBD5E1' }}></div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (isOffline) return;
+                          setOpenCategoryTxId(openCategoryTxId === tx.id ? null : tx.id);
+                          setCategorySearch('');
+                        }}
+                        disabled={isOffline}
+                        title={isOffline ? "Not available offline" : "Click to change category"}
+                        className="w-2.5 h-2.5 rounded-full flex-shrink-0 cursor-pointer hover:scale-125 transition-transform disabled:cursor-not-allowed disabled:opacity-50"
+                        style={{ backgroundColor: tx.category?.colorHex || '#CBD5E1' }}
+                      />
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">
-                          {tx.description || 'No description'}
-                        </div>
-                        <div className="text-xs text-slate-400 dark:text-slate-500">
-                          {tx.category?.name} · {timeAgo(tx.date)}
+                        {editingTxDescId === tx.id ? (
+                          <div className="flex items-center gap-1.5 py-0.5 pr-2">
+                            <input
+                              type="text"
+                              value={editingTxDescValue}
+                              onChange={e => setEditingTxDescValue(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSaveTxDesc(tx);
+                                } else if (e.key === 'Escape') {
+                                  setEditingTxDescId(null);
+                                }
+                              }}
+                              placeholder="Description"
+                              className="w-full max-w-sm text-sm border border-indigo-300 dark:border-indigo-500 rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100"
+                              autoFocus
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveTxDesc(tx)}
+                              className="text-emerald-600 dark:text-emerald-400 font-bold px-1.5 py-0.5 text-sm hover:opacity-80 rounded"
+                              title="Save description"
+                            >
+                              ✓
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingTxDescId(null)}
+                              className="text-slate-400 dark:text-slate-500 font-bold px-1.5 py-0.5 text-sm hover:opacity-80 rounded"
+                              title="Cancel"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <div 
+                            onClick={() => handleStartEditDesc(tx)}
+                            className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate md:cursor-pointer md:hover:text-indigo-600 dark:md:hover:text-indigo-400 transition-colors"
+                            title={isOffline ? "Not available offline" : "Click to edit description"}
+                          >
+                            {tx.description || 'No description'}
+                          </div>
+                        )}
+                        <div className="text-xs text-slate-400 dark:text-slate-500 flex items-center gap-1.5 mt-0.5 relative">
+                          <div className="relative inline-block" data-category-popover>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isOffline) return;
+                                setOpenCategoryTxId(openCategoryTxId === tx.id ? null : tx.id);
+                                setCategorySearch('');
+                              }}
+                              disabled={isOffline}
+                              title={isOffline ? "Not available offline" : "Click to change category"}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 -mx-1.5 rounded hover:bg-slate-200/70 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 font-medium transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed group/cat"
+                            >
+                              <span className="hover:underline">{tx.category?.name || 'Uncategorized'}</span>
+                            </button>
+
+                            {openCategoryTxId === tx.id && (
+                              <div 
+                                className="absolute z-30 top-full left-0 mt-1.5 w-52 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl py-1 text-slate-800 dark:text-slate-100 max-h-60 overflow-hidden flex flex-col"
+                                onClick={e => e.stopPropagation()}
+                              >
+                                {categories.length > 5 && (
+                                  <div className="p-2 border-b border-slate-100 dark:border-slate-700">
+                                    <input
+                                      type="text"
+                                      placeholder="Filter categories..."
+                                      value={categorySearch}
+                                      onChange={e => setCategorySearch(e.target.value)}
+                                      className="w-full text-xs px-2 py-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 dark:text-slate-100"
+                                      autoFocus
+                                    />
+                                  </div>
+                                )}
+                                <div className="overflow-y-auto max-h-48 py-1">
+                                  {categories
+                                    .filter(c => c.name.toLowerCase().includes(categorySearch.toLowerCase()))
+                                    .map(c => (
+                                      <button
+                                        key={c.id}
+                                        type="button"
+                                        onClick={async () => {
+                                          setOpenCategoryTxId(null);
+                                          setCategorySearch('');
+                                          if (c.id !== tx.categoryId) {
+                                            await updateTransaction(tx.id, { categoryId: c.id });
+                                          }
+                                        }}
+                                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center justify-between hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors ${
+                                          c.id === tx.categoryId ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50/50 dark:bg-indigo-950/30' : 'text-slate-700 dark:text-slate-300'
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <span
+                                            className="w-2 h-2 rounded-full flex-shrink-0"
+                                            style={{ backgroundColor: c.colorHex || '#CBD5E1' }}
+                                          />
+                                          <span className="truncate">{c.name}</span>
+                                        </div>
+                                        {c.id === tx.categoryId && <span className="text-indigo-600 dark:text-indigo-400 text-xs">✓</span>}
+                                      </button>
+                                    ))}
+                                  {categories.filter(c => c.name.toLowerCase().includes(categorySearch.toLowerCase())).length === 0 && (
+                                    <div className="px-3 py-2 text-xs text-slate-400 dark:text-slate-500 italic text-center">
+                                      No categories found
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          <span>·</span>
+                          <span>{timeAgo(tx.date)}</span>
                         </div>
                       </div>
                     </div>
@@ -559,17 +737,19 @@ export default function FinanceDashboard() {
                         </div>
                       ) : (
                         <button 
-                            onClick={() => { setEditingTxId(tx.id); setEditingTxAmount(String(tx.amount)); }}
-                            className="text-xl font-semibold text-slate-800 dark:text-slate-200 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-400 dark:text-indigo-400 dark:hover:text-indigo-400 transition-colors cursor-pointer flex flex-col items-end"
-                            title="Click to update amount"
+                            onClick={() => { if (!isOffline) { setEditingTxId(tx.id); setEditingTxAmount(String(tx.amount)); } }}
+                            disabled={isOffline}
+                            className="text-xl font-semibold text-slate-800 dark:text-slate-200 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-400 transition-colors cursor-pointer flex flex-col items-end disabled:opacity-50 disabled:cursor-not-allowed"
+                            title={isOffline ? "Not available offline" : "Click to update amount"}
                         >
                             <span>{defaultCurrency.symbol}{tx.amount.toFixed(2)}</span>
                         </button>
                       )}
                       <button
                         onClick={() => handleDeleteTransaction(tx.id)}
-                        className="hidden md:block opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 dark:text-slate-500 hover:text-red-600 dark:text-red-400 hover:bg-red-50 dark:bg-red-500/10 rounded transition-all"
-                        title="Delete transaction"
+                        disabled={isOffline}
+                        className="hidden md:block opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 dark:text-slate-500 hover:text-red-600 dark:text-red-400 hover:bg-red-50 dark:bg-red-500/10 rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={isOffline ? "Not available offline" : "Delete transaction"}
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
