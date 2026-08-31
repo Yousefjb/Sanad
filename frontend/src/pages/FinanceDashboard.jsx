@@ -123,7 +123,6 @@ export default function FinanceDashboard() {
 
   const handleStartEditDesc = (tx) => {
     if (isOffline) return;
-    if (window.innerWidth < 768) return; // Desktop only
     setEditingTxDescId(tx.id);
     setEditingTxDescValue(tx.description || '');
   };
@@ -638,7 +637,7 @@ export default function FinanceDashboard() {
                         ) : (
                           <div 
                             onClick={() => handleStartEditDesc(tx)}
-                            className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate md:cursor-pointer md:hover:text-indigo-600 dark:md:hover:text-indigo-400 transition-colors"
+                            className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate cursor-pointer hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
                             title={isOffline ? "Not available offline" : "Click to edit description"}
                           >
                             {tx.description || 'No description'}
