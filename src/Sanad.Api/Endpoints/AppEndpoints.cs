@@ -1,6 +1,11 @@
-using Microsoft.EntityFrameworkCore;
-using Sanad.Api.Data;
+using System;
+using System.Net.Http;
+using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -11,54 +16,35 @@ public static class AppEndpoints
         var group = endpoints.MapGroup("/api/apps")
             .RequireAuthorization();
 
-        group.MapGet("/", async (SanadDbContext db) =>
+        group.MapGet("/", async (IAppService svc) =>
         {
-            var apps = await db.CustomApps.OrderByDescending(a => a.CreatedAt).ToListAsync();
+            var apps = await svc.GetAppsAsync();
             return Results.Ok(apps);
         });
 
-        group.MapGet("/{id:guid}", async (Guid id, SanadDbContext db) =>
+        group.MapGet("/{id:guid}", async (Guid id, IAppService svc) =>
         {
-            var app = await db.CustomApps.FindAsync(id);
+            var app = await svc.GetAppByIdAsync(id);
             return app != null ? Results.Ok(app) : Results.NotFound();
         });
 
-        group.MapPost("/", async (CustomApp app, SanadDbContext db) =>
+        group.MapPost("/", async (CustomApp app, IAppService svc) =>
         {
-            app.Id = Guid.NewGuid();
-            app.CreatedAt = DateTime.UtcNow;
-            app.UpdatedAt = DateTime.UtcNow;
-
-            db.CustomApps.Add(app);
-            await db.SaveChangesAsync();
-
-            return Results.Created($"/api/apps/{app.Id}", app);
+            var created = await svc.CreateAppAsync(app);
+            return Results.Created($"/api/apps/{created.Id}", created);
         });
 
-        group.MapPut("/{id:guid}", async (Guid id, CustomApp updatedApp, SanadDbContext db) =>
+        group.MapPut("/{id:guid}", async (Guid id, CustomApp updatedApp, IAppService svc) =>
         {
-            var app = await db.CustomApps.FindAsync(id);
+            var app = await svc.UpdateAppAsync(id, updatedApp);
             if (app == null) return Results.NotFound();
-
-            app.Name = updatedApp.Name;
-            app.HtmlContent = updatedApp.HtmlContent;
-            app.Icon = updatedApp.Icon;
-            app.ShowInDashboard = updatedApp.ShowInDashboard;
-            app.IsStandalone = updatedApp.IsStandalone;
-            app.UpdatedAt = DateTime.UtcNow;
-
-            await db.SaveChangesAsync();
             return Results.Ok(app);
         });
 
-        group.MapDelete("/{id:guid}", async (Guid id, SanadDbContext db) =>
+        group.MapDelete("/{id:guid}", async (Guid id, IAppService svc) =>
         {
-            var app = await db.CustomApps.FindAsync(id);
-            if (app == null) return Results.NotFound();
-
-            db.CustomApps.Remove(app);
-            await db.SaveChangesAsync();
-
+            var success = await svc.DeleteAppAsync(id);
+            if (!success) return Results.NotFound();
             return Results.NoContent();
         });
 
@@ -69,36 +55,36 @@ public static class AppEndpoints
 
             try
             {
-                var client = httpClientFactory.CreateClient();
-                var requestMessage = new HttpRequestMessage(new HttpMethod(req.Method), req.Url);
+                var client = httpClientFactory.CreateClient("AppProxy");
+                var message = new HttpRequestMessage(new HttpMethod(req.Method ?? "GET"), req.Url);
 
                 if (req.Headers != null)
                 {
-                    foreach (var header in req.Headers)
+                    foreach (var (key, value) in req.Headers)
                     {
-                        // Some headers might need to be added to content rather than request
-                        if (header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase)) continue;
-                        requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                        if (key.Equals("Host", StringComparison.OrdinalIgnoreCase) || 
+                            key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        message.Headers.TryAddWithoutValidation(key, value);
                     }
                 }
 
-                if (!string.IsNullOrEmpty(req.Body) && req.Method.ToUpper() != "GET")
+                if (!string.IsNullOrEmpty(req.Body) && 
+                    (message.Method == HttpMethod.Post || message.Method == HttpMethod.Put || message.Method == HttpMethod.Patch))
                 {
-                    requestMessage.Content = new StringContent(req.Body);
-                    if (req.Headers != null && req.Headers.TryGetValue("Content-Type", out var contentType))
-                    {
-                        requestMessage.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
-                    }
+                    message.Content = new StringContent(req.Body, Encoding.UTF8, "application/json");
                 }
 
-                var response = await client.SendAsync(requestMessage);
+                var response = await client.SendAsync(message);
                 var content = await response.Content.ReadAsStringAsync();
+                var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/json";
 
-                return Results.Content(content, response.Content.Headers.ContentType?.ToString() ?? "text/plain", System.Text.Encoding.UTF8, (int)response.StatusCode);
+                return Results.Content(content, contentType, statusCode: (int)response.StatusCode);
             }
             catch (Exception ex)
             {
-                return Results.Problem(ex.Message, statusCode: 500);
+                return Results.Problem($"Proxy error: {ex.Message}");
             }
         });
     }
@@ -107,7 +93,7 @@ public static class AppEndpoints
 public class ProxyRequest
 {
     public string Url { get; set; } = string.Empty;
-    public string Method { get; set; } = "GET";
+    public string? Method { get; set; } = "GET";
     public Dictionary<string, string>? Headers { get; set; }
     public string? Body { get; set; }
 }

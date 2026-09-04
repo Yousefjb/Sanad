@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Sanad.Api.Data;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -10,90 +11,42 @@ public static class HabitEndpoints
     {
         var group = routes.MapGroup("/api/habits");
 
-        group.MapGet("/", async (SanadDbContext db) =>
+        group.MapGet("/", async (IHabitService svc) =>
         {
-            return await db.Habits
-                .Include(h => h.Logs)
-                .Where(h => !h.IsDeleted)
-                .OrderBy(h => h.Order)
-                .ThenByDescending(h => h.CreatedAt)
-                .ToListAsync();
+            var habits = await svc.GetHabitsAsync();
+            return Results.Ok(habits);
         });
 
-        group.MapPost("/", async (SanadDbContext db, Habit habit) =>
+        group.MapPost("/", async (IHabitService svc, Habit habit) =>
         {
-            habit.Id = Guid.NewGuid().ToString();
-            habit.CreatedAt = DateTime.UtcNow;
-            db.Habits.Add(habit);
-            await db.SaveChangesAsync();
-            return Results.Created($"/api/habits/{habit.Id}", habit);
+            var created = await svc.CreateHabitAsync(habit);
+            return Results.Created($"/api/habits/{created.Id}", created);
         });
 
-        group.MapPut("/{id}", async (SanadDbContext db, string id, Habit inputHabit) =>
+        group.MapPut("/{id}", async (IHabitService svc, string id, Habit inputHabit) =>
         {
-            var habit = await db.Habits.FindAsync(id);
-            if (habit is null || habit.IsDeleted) return Results.NotFound();
-
-            habit.Name = inputHabit.Name;
-            habit.Icon = inputHabit.Icon;
-            habit.Frequency = inputHabit.Frequency;
-
-            await db.SaveChangesAsync();
+            var updated = await svc.UpdateHabitAsync(id, inputHabit.Name, inputHabit.Icon, inputHabit.Frequency);
+            if (updated is null) return Results.NotFound();
             return Results.NoContent();
         });
 
-        group.MapDelete("/{id}", async (SanadDbContext db, string id) =>
+        group.MapDelete("/{id}", async (IHabitService svc, string id) =>
         {
-            var habit = await db.Habits.FindAsync(id);
-            if (habit is null || habit.IsDeleted) return Results.NotFound();
-
-            habit.IsDeleted = true;
-            await db.SaveChangesAsync();
+            var success = await svc.DeleteHabitAsync(id);
+            if (!success) return Results.NotFound();
             return Results.NoContent();
         });
 
-        group.MapPost("/{id}/toggle", async (SanadDbContext db, string id, ToggleHabitLogRequest req) =>
+        group.MapPost("/{id}/toggle", async (IHabitService svc, string id, ToggleHabitLogRequest req) =>
         {
-            var habit = await db.Habits.FindAsync(id);
-            if (habit is null || habit.IsDeleted) return Results.NotFound();
-
-            var targetDate = req.Date.Date;
-
-            var log = await db.HabitLogs.FirstOrDefaultAsync(l => l.HabitId == id && l.Date.Date == targetDate);
-            if (log != null)
-            {
-                log.Completed = !log.Completed;
-            }
-            else
-            {
-                log = new HabitLog
-                {
-                    Id = Guid.NewGuid().ToString(),
-                    HabitId = id,
-                    Date = targetDate,
-                    Completed = true
-                };
-                db.HabitLogs.Add(log);
-            }
-
-            await db.SaveChangesAsync();
+            var log = await svc.ToggleHabitLogAsync(id, req.Date);
+            if (log is null) return Results.NotFound();
             return Results.Ok(log);
         });
 
-        group.MapPut("/reorder", async (SanadDbContext db, ReorderHabitsRequest req) =>
+        group.MapPut("/reorder", async (IHabitService svc, ReorderHabitsRequest req) =>
         {
-            var habits = await db.Habits.Where(h => req.HabitIds.Contains(h.Id)).ToListAsync();
-            
-            for (int i = 0; i < req.HabitIds.Count; i++)
-            {
-                var habit = habits.FirstOrDefault(h => h.Id == req.HabitIds[i]);
-                if (habit != null)
-                {
-                    habit.Order = i;
-                }
-            }
-
-            await db.SaveChangesAsync();
+            await svc.ReorderHabitsAsync(req.HabitIds);
             return Results.NoContent();
         });
     }

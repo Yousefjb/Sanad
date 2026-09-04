@@ -1,6 +1,11 @@
-using Microsoft.EntityFrameworkCore;
+using System;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Sanad.Api.Data;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -8,324 +13,178 @@ public static class FinanceEndpoints
 {
     public static void MapFinanceEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/api/finances/categories", GetCategories);
-        app.MapPost("/api/finances/categories", CreateCategory);
-        app.MapPut("/api/finances/categories/{id}", UpdateCategory);
-        app.MapGet("/api/finances/transactions", GetTransactions);
-        app.MapPost("/api/finances/transactions", CreateTransaction);
-        app.MapPut("/api/finances/transactions/{id}", UpdateTransaction);
-        app.MapDelete("/api/finances/transactions/{id}", DeleteTransaction);
-        app.MapGet("/api/finances/summary", GetSummary);
-        app.MapGet("/api/finances/budget", GetMonthlyBudget);
-        app.MapPut("/api/finances/budget", SetMonthlyBudget);
+        app.MapGet("/api/finances/categories", (IFinanceService svc) => GetCategories(svc));
+        app.MapPost("/api/finances/categories", (IFinanceService svc, TransactionCategory category) => CreateCategory(svc, category));
+        app.MapPut("/api/finances/categories/{id}", (IFinanceService svc, Guid id, TransactionCategory updated) => UpdateCategory(svc, id, updated));
+        app.MapGet("/api/finances/transactions", (IFinanceService svc, int? month, int? year, int page, int pageSize, string? search, Guid? categoryId) =>
+            GetTransactions(svc, month, year, page, pageSize, search, categoryId));
+        app.MapPost("/api/finances/transactions", (IFinanceService svc, Transaction transaction) => CreateTransaction(svc, transaction));
+        app.MapPut("/api/finances/transactions/{id}", (IFinanceService svc, Guid id, UpdateTransactionRequest updated) => UpdateTransaction(svc, id, updated));
+        app.MapDelete("/api/finances/transactions/{id}", (IFinanceService svc, Guid id) => DeleteTransaction(svc, id));
+        app.MapGet("/api/finances/summary", (IFinanceService svc, int? month, int? year) => GetSummary(svc, month, year));
+        app.MapGet("/api/finances/budget", (IFinanceService svc, int? month, int? year) => GetMonthlyBudget(svc, month, year));
+        app.MapPut("/api/finances/budget", (IFinanceService svc, MonthlyBudgetRequest request) => SetMonthlyBudget(svc, request));
 
-        app.MapGet("/api/finances/currencies", GetCurrencies);
-        app.MapPost("/api/finances/currencies", CreateCurrency);
-        app.MapPut("/api/finances/currencies/{id}", UpdateCurrency);
-        app.MapDelete("/api/finances/currencies/{id}", DeleteCurrency);
-        app.MapPut("/api/finances/currencies/{id}/set-default", SetDefaultCurrency);
+        app.MapGet("/api/finances/currencies", (IFinanceService svc) => GetCurrencies(svc));
+        app.MapPost("/api/finances/currencies", (IFinanceService svc, Currency currency) => CreateCurrency(svc, currency));
+        app.MapPut("/api/finances/currencies/{id}", (IFinanceService svc, Guid id, Currency updated) => UpdateCurrency(svc, id, updated));
+        app.MapDelete("/api/finances/currencies/{id}", (IFinanceService svc, Guid id) => DeleteCurrency(svc, id));
+        app.MapPut("/api/finances/currencies/{id}/set-default", (IFinanceService svc, Guid id) => SetDefaultCurrency(svc, id));
     }
 
-    public static async Task<IResult> GetCategories(SanadDbContext db) => 
-        Results.Ok(await db.TransactionCategories.ToListAsync());
+    public static async Task<IResult> GetCategories(IFinanceService svc) =>
+        Results.Ok(await svc.GetCategoriesAsync());
 
-    public static async Task<IResult> CreateCategory(SanadDbContext db, TransactionCategory category)
+    public static Task<IResult> GetCategories(SanadDbContext db) =>
+        GetCategories(new FinanceService(db));
+
+    public static async Task<IResult> CreateCategory(IFinanceService svc, TransactionCategory category)
     {
-        db.TransactionCategories.Add(category);
-        await db.SaveChangesAsync();
-        return Results.Created($"/api/finances/categories/{category.Id}", category);
+        var created = await svc.CreateCategoryAsync(category);
+        return Results.Created($"/api/finances/categories/{created.Id}", created);
     }
 
-    public static async Task<IResult> UpdateCategory(SanadDbContext db, Guid id, TransactionCategory updated)
+    public static Task<IResult> CreateCategory(SanadDbContext db, TransactionCategory category) =>
+        CreateCategory(new FinanceService(db), category);
+
+    public static async Task<IResult> UpdateCategory(IFinanceService svc, Guid id, TransactionCategory updated)
     {
-        var category = await db.TransactionCategories.FindAsync(id);
+        var category = await svc.UpdateCategoryAsync(id, updated);
         if (category is null) return Results.NotFound();
-
-        category.Name = updated.Name;
-        category.ColorHex = updated.ColorHex;
-        category.MonthlyBudget = updated.MonthlyBudget;
-
-        await db.SaveChangesAsync();
         return Results.Ok(category);
     }
 
+    public static Task<IResult> UpdateCategory(SanadDbContext db, Guid id, TransactionCategory updated) =>
+        UpdateCategory(new FinanceService(db), id, updated);
+
     public static async Task<IResult> GetTransactions(
-        SanadDbContext db, 
-        int? month, 
-        int? year, 
-        int page = 1, 
+        IFinanceService svc,
+        int? month,
+        int? year,
+        int page = 1,
         int pageSize = 15,
         string? search = null,
         Guid? categoryId = null)
     {
-        var targetMonth = month ?? DateTime.UtcNow.Month;
-        var targetYear = year ?? DateTime.UtcNow.Year;
-        var startDate = new DateTime(targetYear, targetMonth, 1, 0, 0, 0, DateTimeKind.Utc);
-        var endDate = startDate.AddMonths(1);
-
-        var query = db.Transactions
-            .Include(t => t.Category)
-            .Where(t => t.Date >= startDate && t.Date < endDate);
-
-        if (!string.IsNullOrWhiteSpace(search))
-        {
-            var searchLower = search.ToLower();
-            query = query.Where(t => t.Description != null && t.Description.ToLower().Contains(searchLower));
-        }
-
-        if (categoryId.HasValue)
-        {
-            query = query.Where(t => t.CategoryId == categoryId.Value);
-        }
-
-        var totalCount = await query.CountAsync();
-
-        var items = await query
-            .OrderByDescending(t => t.Date)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
-            
-        return Results.Ok(new 
+        var (items, totalCount, hasMore) = await svc.GetTransactionsPaginatedAsync(month, year, page, pageSize, search, categoryId);
+        return Results.Ok(new
         {
             Items = items,
             TotalCount = totalCount,
-            HasMore = totalCount > page * pageSize
+            HasMore = hasMore
         });
     }
 
-    public static async Task<IResult> CreateTransaction(SanadDbContext db, Transaction transaction)
-    {
-        var categoryExists = await db.TransactionCategories.AnyAsync(c => c.Id == transaction.CategoryId);
-        if (!categoryExists)
-        {
-            return Results.BadRequest("Category not found");
-        }
+    public static Task<IResult> GetTransactions(
+        SanadDbContext db,
+        int? month,
+        int? year,
+        int page = 1,
+        int pageSize = 15,
+        string? search = null,
+        Guid? categoryId = null) =>
+        GetTransactions(new FinanceService(db), month, year, page, pageSize, search, categoryId);
 
-        db.Transactions.Add(transaction);
-        
-        await db.SaveChangesAsync();
-        return Results.Created($"/api/finances/transactions/{transaction.Id}", transaction);
+    public static async Task<IResult> CreateTransaction(IFinanceService svc, Transaction transaction)
+    {
+        var created = await svc.CreateTransactionAsync(transaction);
+        if (created == null) return Results.BadRequest("Category not found");
+        return Results.Created($"/api/finances/transactions/{created.Id}", created);
     }
 
-    public static async Task<IResult> UpdateTransaction(SanadDbContext db, Guid id, UpdateTransactionRequest updated)
+    public static Task<IResult> CreateTransaction(SanadDbContext db, Transaction transaction) =>
+        CreateTransaction(new FinanceService(db), transaction);
+
+    public static async Task<IResult> UpdateTransaction(IFinanceService svc, Guid id, UpdateTransactionRequest updated)
     {
-        var transaction = await db.Transactions.Include(t => t.Category).FirstOrDefaultAsync(t => t.Id == id);
+        var transaction = await svc.UpdateTransactionAsync(id, updated.Amount, updated.Description, updated.CategoryId, updated.Date, updated.Type);
         if (transaction is null) return Results.NotFound();
-
-        if (updated.Amount.HasValue)
-        {
-            transaction.Amount = updated.Amount.Value;
-        }
-
-        if (updated.Description != null)
-        {
-            transaction.Description = updated.Description;
-        }
-
-        if (updated.CategoryId.HasValue && updated.CategoryId.Value != Guid.Empty)
-        {
-            var category = await db.TransactionCategories.FindAsync(updated.CategoryId.Value);
-            if (category == null)
-            {
-                return Results.BadRequest("Category not found");
-            }
-            transaction.CategoryId = updated.CategoryId.Value;
-            transaction.Category = category;
-        }
-
-        if (updated.Date.HasValue)
-        {
-            transaction.Date = updated.Date.Value;
-        }
-
-        if (!string.IsNullOrEmpty(updated.Type))
-        {
-            transaction.Type = updated.Type;
-        }
-
-        await db.SaveChangesAsync();
         return Results.Ok(transaction);
     }
 
-    public static async Task<IResult> DeleteTransaction(SanadDbContext db, Guid id)
-    {
-        var transaction = await db.Transactions.FindAsync(id);
-        if (transaction is null) return Results.NotFound();
+    public static Task<IResult> UpdateTransaction(SanadDbContext db, Guid id, UpdateTransactionRequest updated) =>
+        UpdateTransaction(new FinanceService(db), id, updated);
 
-        db.Transactions.Remove(transaction);
-        await db.SaveChangesAsync();
+    public static async Task<IResult> DeleteTransaction(IFinanceService svc, Guid id)
+    {
+        var success = await svc.DeleteTransactionAsync(id);
+        if (!success) return Results.NotFound();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> GetSummary(SanadDbContext db, int? month, int? year)
+    public static Task<IResult> DeleteTransaction(SanadDbContext db, Guid id) =>
+        DeleteTransaction(new FinanceService(db), id);
+
+    public static async Task<IResult> GetSummary(IFinanceService svc, int? month, int? year) =>
+        Results.Ok(await svc.GetSummaryAsync(month, year));
+
+    public static Task<IResult> GetSummary(SanadDbContext db, int? month, int? year) =>
+        GetSummary(new FinanceService(db), month, year);
+
+    public static async Task<IResult> GetMonthlyBudget(IFinanceService svc, int? month, int? year)
     {
         var targetMonth = month ?? DateTime.UtcNow.Month;
         var targetYear = year ?? DateTime.UtcNow.Year;
-        var startDate = new DateTime(targetYear, targetMonth, 1, 0, 0, 0, DateTimeKind.Utc);
-        var endDate = startDate.AddMonths(1);
-        
-        var categories = await db.TransactionCategories.ToListAsync();
-        var categorySpends = await db.Transactions
-            .Where(t => t.Date >= startDate && t.Date < endDate && t.Type == "Expense")
-            .GroupBy(t => t.CategoryId)
-            .Select(g => new { CategoryId = g.Key, TotalAmount = g.Sum(t => t.Amount) })
-            .ToDictionaryAsync(g => g.CategoryId, g => g.TotalAmount);
-
-        var monthlyBudget = await db.MonthlyBudgets
-            .FirstOrDefaultAsync(b => b.Year == targetYear && b.Month == targetMonth);
-
-        var categorySummary = categories.Select(c => 
-        {
-            var spent = categorySpends.GetValueOrDefault(c.Id, 0);
-            return new
-            {
-                Category = c,
-                Spent = spent,
-                Remaining = c.MonthlyBudget - spent
-            };
-        });
-
-        return Results.Ok(new
-        {
-            Categories = categorySummary,
-            MonthlyBudget = monthlyBudget?.Amount ?? 0m,
-            TotalSpent = categorySpends.Values.Sum()
-        });
+        var amount = await svc.GetMonthlyBudgetAsync(targetMonth, targetYear);
+        return Results.Ok(new { Amount = amount, Year = targetYear, Month = targetMonth });
     }
 
-    public static async Task<IResult> GetMonthlyBudget(SanadDbContext db, int? month, int? year)
+    public static Task<IResult> GetMonthlyBudget(SanadDbContext db, int? month, int? year) =>
+        GetMonthlyBudget(new FinanceService(db), month, year);
+
+    public static async Task<IResult> SetMonthlyBudget(IFinanceService svc, MonthlyBudgetRequest request)
     {
-        var targetMonth = month ?? DateTime.UtcNow.Month;
-        var targetYear = year ?? DateTime.UtcNow.Year;
-
-        var budget = await db.MonthlyBudgets
-            .FirstOrDefaultAsync(b => b.Year == targetYear && b.Month == targetMonth);
-
-        return Results.Ok(new { Amount = budget?.Amount ?? 0m, Year = targetYear, Month = targetMonth });
-    }
-
-    public static async Task<IResult> SetMonthlyBudget(SanadDbContext db, MonthlyBudgetRequest request)
-    {
-        var targetMonth = request.Month ?? DateTime.UtcNow.Month;
-        var targetYear = request.Year ?? DateTime.UtcNow.Year;
-
-        var budget = await db.MonthlyBudgets
-            .FirstOrDefaultAsync(b => b.Year == targetYear && b.Month == targetMonth);
-
-        if (budget is null)
-        {
-            budget = new MonthlyBudget
-            {
-                Year = targetYear,
-                Month = targetMonth,
-                Amount = request.Amount
-            };
-            db.MonthlyBudgets.Add(budget);
-        }
-        else
-        {
-            budget.Amount = request.Amount;
-        }
-
-        await db.SaveChangesAsync();
+        var budget = await svc.SetMonthlyBudgetAsync(request.Month, request.Year, request.Amount);
         return Results.Ok(budget);
     }
 
-    public static async Task<IResult> GetCurrencies(SanadDbContext db) =>
-        Results.Ok(await db.Currencies.ToListAsync());
+    public static Task<IResult> SetMonthlyBudget(SanadDbContext db, MonthlyBudgetRequest request) =>
+        SetMonthlyBudget(new FinanceService(db), request);
 
-    public static async Task<IResult> CreateCurrency(SanadDbContext db, Currency currency)
+    public static async Task<IResult> GetCurrencies(IFinanceService svc) =>
+        Results.Ok(await svc.GetCurrenciesAsync());
+
+    public static Task<IResult> GetCurrencies(SanadDbContext db) =>
+        GetCurrencies(new FinanceService(db));
+
+    public static async Task<IResult> CreateCurrency(IFinanceService svc, Currency currency)
     {
-        // If it's the first currency, make it default regardless of input.
-        // If it's set to default, we must unset other defaults and flip exchange rates.
-        // To simplify, CreateCurrency will NOT flip exchange rates. If they want to set it as default, they should use SetDefaultCurrency.
-        var hasCurrencies = await db.Currencies.AnyAsync();
-        currency.IsDefault = !hasCurrencies;
-        
-        currency.CreatedAt = DateTime.UtcNow;
-        currency.UpdatedAt = DateTime.UtcNow;
-        
-        db.Currencies.Add(currency);
-        await db.SaveChangesAsync();
-        return Results.Created($"/api/finances/currencies/{currency.Id}", currency);
+        var created = await svc.CreateCurrencyAsync(currency);
+        return Results.Created($"/api/finances/currencies/{created.Id}", created);
     }
 
-    public static async Task<IResult> UpdateCurrency(SanadDbContext db, Guid id, Currency updated)
+    public static Task<IResult> CreateCurrency(SanadDbContext db, Currency currency) =>
+        CreateCurrency(new FinanceService(db), currency);
+
+    public static async Task<IResult> UpdateCurrency(IFinanceService svc, Guid id, Currency updated)
     {
-        var currency = await db.Currencies.FindAsync(id);
+        var currency = await svc.UpdateCurrencyAsync(id, updated);
         if (currency is null) return Results.NotFound();
-
-        currency.Name = updated.Name;
-        currency.Code = updated.Code;
-        currency.Symbol = updated.Symbol;
-        
-        // We only allow updating ExchangeRate if it's not the default currency
-        if (!currency.IsDefault)
-        {
-            currency.ExchangeRateToDefault = updated.ExchangeRateToDefault;
-        }
-
-        currency.UpdatedAt = DateTime.UtcNow;
-
-        await db.SaveChangesAsync();
         return Results.Ok(currency);
     }
 
-    public static async Task<IResult> DeleteCurrency(SanadDbContext db, Guid id)
+    public static Task<IResult> UpdateCurrency(SanadDbContext db, Guid id, Currency updated) =>
+        UpdateCurrency(new FinanceService(db), id, updated);
+
+    public static async Task<IResult> DeleteCurrency(IFinanceService svc, Guid id)
     {
-        var currency = await db.Currencies.FindAsync(id);
-        if (currency is null) return Results.NotFound();
-
-        if (currency.IsDefault)
-            return Results.BadRequest("Cannot delete the default currency.");
-
-        var hasAssets = await db.Assets.AnyAsync(a => a.CurrencyId == id);
-        var hasDebts = await db.Debts.AnyAsync(d => d.CurrencyId == id);
-        if (hasAssets || hasDebts)
-            return Results.BadRequest("Cannot delete currency because it is used by assets or debts.");
-
-        db.Currencies.Remove(currency);
-        await db.SaveChangesAsync();
+        var success = await svc.DeleteCurrencyAsync(id);
+        if (!success) return Results.BadRequest("Cannot delete currency.");
         return Results.NoContent();
     }
 
-    public static async Task<IResult> SetDefaultCurrency(SanadDbContext db, Guid id)
+    public static Task<IResult> DeleteCurrency(SanadDbContext db, Guid id) =>
+        DeleteCurrency(new FinanceService(db), id);
+
+    public static async Task<IResult> SetDefaultCurrency(IFinanceService svc, Guid id)
     {
-        var newDefault = await db.Currencies.FindAsync(id);
-        if (newDefault is null) return Results.NotFound();
-        
-        if (newDefault.IsDefault) return Results.Ok(newDefault);
-
-        var currentDefault = await db.Currencies.FirstOrDefaultAsync(c => c.IsDefault);
-        
-        var allCurrencies = await db.Currencies.ToListAsync();
-        var newDefaultRate = newDefault.ExchangeRateToDefault;
-
-        if (newDefaultRate <= 0) 
-            return Results.BadRequest("Invalid exchange rate for the new default currency.");
-
-        foreach (var currency in allCurrencies)
-        {
-            if (currency.Id == newDefault.Id)
-            {
-                currency.IsDefault = true;
-                currency.ExchangeRateToDefault = 1.0m;
-            }
-            else
-            {
-                currency.IsDefault = false;
-                // If JOD was 1.41 USD, and JOD becomes default:
-                // USD rate becomes 1 / 1.41
-                // EUR rate (which was say 1.10 USD) becomes 1.10 / 1.41
-                currency.ExchangeRateToDefault = Math.Round(currency.ExchangeRateToDefault / newDefaultRate, 6);
-            }
-            currency.UpdatedAt = DateTime.UtcNow;
-        }
-
-        await db.SaveChangesAsync();
-        return Results.Ok(newDefault);
+        var success = await svc.SetDefaultCurrencyAsync(id);
+        if (!success) return Results.BadRequest("Invalid exchange rate or currency not found.");
+        return Results.Ok();
     }
+
+    public static Task<IResult> SetDefaultCurrency(SanadDbContext db, Guid id) =>
+        SetDefaultCurrency(new FinanceService(db), id);
 }
 
 public record MonthlyBudgetRequest(decimal Amount, int? Month, int? Year);

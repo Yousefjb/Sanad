@@ -1,6 +1,10 @@
-using Microsoft.EntityFrameworkCore;
-using Sanad.Api.Data;
+using System;
+using System.Net.Http;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -10,7 +14,7 @@ public static class BookEndpoints
     {
         var group = app.MapGroup("/api/books");
 
-        group.MapGet("/search", async (string query, Services.IBookSearchService searchService) =>
+        group.MapGet("/search", async (string query, IBookSearchService searchService) =>
         {
             var results = await searchService.SearchBooksAsync(query);
             return Results.Ok(results);
@@ -36,40 +40,30 @@ public static class BookEndpoints
             }
         });
 
-        group.MapPost("/", async (SanadDbContext db, Book book) =>
+        group.MapPost("/", async (IBookService svc, Book book) =>
         {
-            db.Books.Add(book);
-            await db.SaveChangesAsync();
-            return Results.Created($"/api/books/{book.Id}", book);
+            var created = await svc.CreateBookAsync(book);
+            return Results.Created($"/api/books/{created.Id}", created);
         });
 
-        group.MapGet("/", async (SanadDbContext db) =>
+        group.MapGet("/", async (IBookService svc) =>
         {
-            var books = await db.Books.OrderByDescending(b => b.CreatedAt).ToListAsync();
+            var books = await svc.GetBooksAsync();
             return Results.Ok(books);
         });
 
-        group.MapPut("/{id}", async (int id, SanadDbContext db, Book updatedBook) =>
+        group.MapPut("/{id}", async (int id, IBookService svc, Book updatedBook) =>
         {
-            var book = await db.Books.FindAsync(id);
+            var book = await svc.UpdateBookAsync(id, updatedBook);
             if (book == null) return Results.NotFound();
-
-            book.Title = updatedBook.Title;
-            book.Author = updatedBook.Author;
-            book.CoverUrl = updatedBook.CoverUrl;
-            book.TotalPages = updatedBook.TotalPages;
-
-            await db.SaveChangesAsync();
             return Results.Ok(book);
         });
 
-        group.MapDelete("/{id}", async (int id, SanadDbContext db) =>
+        group.MapDelete("/{id}", async (int id, IBookService svc) =>
         {
-            var book = await db.Books.FindAsync(id);
-            if (book == null) return Results.NotFound();
-
-            db.Books.Remove(book);
-            await db.SaveChangesAsync();
+            var success = await svc.DeleteBookAsync(id);
+            if (!success) return Results.NotFound();
             return Results.NoContent();
         });
-    }}
+    }
+}

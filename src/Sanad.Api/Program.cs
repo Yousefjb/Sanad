@@ -89,6 +89,20 @@ builder.Services.AddMcpServer()
     .WithHttpTransport(options => options.Stateless = true)
     .WithTools<McpEndpoints>();
 
+// Domain Services
+builder.Services.AddScoped<ITaskService, TaskService>();
+builder.Services.AddScoped<IThoughtService, ThoughtService>();
+builder.Services.AddScoped<IHabitService, HabitService>();
+builder.Services.AddScoped<IGoalService, GoalService>();
+builder.Services.AddScoped<IFinanceService, FinanceService>();
+builder.Services.AddScoped<IDebtService, DebtService>();
+builder.Services.AddScoped<IReadingService, ReadingService>();
+builder.Services.AddScoped<IBookService, BookService>();
+builder.Services.AddScoped<INoteService, NoteService>();
+builder.Services.AddScoped<ICalendarService, CalendarService>();
+builder.Services.AddScoped<IStorageService, StorageService>();
+builder.Services.AddScoped<IAppService, AppService>();
+
 // Change to Scoped since it needs ITenantProvider
 builder.Services.AddScoped<FileStorageService>();
 builder.Services.AddScoped<FileManagerService>();

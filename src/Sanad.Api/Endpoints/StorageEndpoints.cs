@@ -1,5 +1,11 @@
+using System.IO;
+using System.Linq;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Sanad.Api.Data;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -9,25 +15,30 @@ public static class StorageEndpoints
     {
         var group = app.MapGroup("/api/storage").RequireAuthorization();
 
-        group.MapGet("/", async (AdminDbContext db, Services.DiskQuotaService quotaService, HttpContext context) =>
+        group.MapGet("/", async (IStorageService storageService, HttpContext context) =>
         {
             var username = context.User.Identity?.Name;
             if (string.IsNullOrEmpty(username)) return Results.Unauthorized();
 
-            var user = await db.Users.Include(u => u.Tier).FirstOrDefaultAsync(u => u.Username == username);
-            if (user == null) return Results.NotFound();
-
-            var userPath = Path.Combine(Directory.GetCurrentDirectory(), "Data", username);
-            var diskUsed = quotaService.GetDirectorySize(userPath);
-
-            var diskLimitBytes = user.Tier?.DiskLimitBytes ?? (1L * Constants.GigaByte);
-
-            return Results.Ok(new { diskUsed, diskLimitBytes, isAdmin = user.IsAdmin });
+            try
+            {
+                var status = await storageService.GetStorageStatusAsync(username);
+                return Results.Ok(new
+                {
+                    diskUsed = status.DiskUsedBytes,
+                    diskLimitBytes = status.DiskLimitBytes,
+                    isAdmin = status.IsAdmin
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                return Results.NotFound();
+            }
         });
 
-        group.MapGet("/tiers", async (AdminDbContext db) =>
+        group.MapGet("/tiers", async (IStorageService storageService) =>
         {
-            var tiers = await db.Tiers.ToListAsync();
+            var tiers = await storageService.GetTiersAsync();
             return Results.Ok(tiers);
         }).AllowAnonymous();
 

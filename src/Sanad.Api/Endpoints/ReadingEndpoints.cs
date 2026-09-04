@@ -1,6 +1,10 @@
-using Microsoft.EntityFrameworkCore;
+using System.Collections.Generic;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Sanad.Api.Data;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -10,141 +14,56 @@ public static class ReadingEndpoints
     {
         var group = app.MapGroup("/api/reading");
 
-        group.MapGet("/periods", async (SanadDbContext db) =>
+        group.MapGet("/periods", async (IReadingService svc) =>
         {
-            var periods = await db.ReadingPeriods
-                .Include(p => p.Book)
-                .Include(p => p.Plans)
-                .Include(p => p.Logs)
-                .OrderByDescending(p => p.StartDate)
-                .ToListAsync();
+            var periods = await svc.GetReadingPeriodsAsync();
             return Results.Ok(periods);
         });
 
-        group.MapPost("/periods", async (SanadDbContext db, StartPeriodDto dto) =>
+        group.MapPost("/periods", async (IReadingService svc, StartPeriodDto dto) =>
         {
-            var period = new ReadingPeriod
-            {
-                BookId = dto.BookId,
-                Status = "Reading",
-                StartDate = DateTime.UtcNow,
-                Plans = dto.Plans.Select((p, i) => new ReadingPlan
-                {
-                    Title = p.Title,
-                    StartPage = p.StartPage,
-                    EndPage = p.EndPage,
-                    OrderIndex = i
-                }).ToList()
-            };
-            db.ReadingPeriods.Add(period);
-            await db.SaveChangesAsync();
+            var period = await svc.StartReadingPeriodAsync(dto.BookId, dto.Plans);
             return Results.Created($"/api/reading/periods/{period.Id}", period);
         });
 
-        group.MapPost("/logs", async (SanadDbContext db, LogDto dto) =>
+        group.MapPost("/logs", async (IReadingService svc, LogDto dto) =>
         {
-            var period = await db.ReadingPeriods
-                .Include(p => p.Book)
-                .FirstOrDefaultAsync(p => p.Id == dto.ReadingPeriodId);
-                
-            if (period == null) return Results.NotFound();
-
-            var log = new ReadingLog
-            {
-                ReadingPeriodId = dto.ReadingPeriodId,
-                Date = DateTime.UtcNow,
-                StartPage = dto.StartPage,
-                EndPage = dto.EndPage
-            };
-            db.ReadingLogs.Add(log);
-
-            if (dto.EndPage >= period.Book.TotalPages)
-            {
-                period.Status = "Completed";
-                period.EndDate = DateTime.UtcNow;
-            }
-
-            await db.SaveChangesAsync();
+            var log = await svc.LogReadingAsync(dto.ReadingPeriodId, dto.StartPage, dto.EndPage);
+            if (log == null) return Results.NotFound();
             return Results.Ok(log);
         });
 
-        group.MapPut("/periods/{id}/plans", async (int id, SanadDbContext db, List<PlanDto> plans) =>
+        group.MapPut("/periods/{id}/plans", async (int id, IReadingService svc, List<Sanad.Api.Services.PlanDto> plans) =>
         {
-            var period = await db.ReadingPeriods.Include(p => p.Plans).FirstOrDefaultAsync(p => p.Id == id);
-            if (period == null) return Results.NotFound();
-
-            db.ReadingPlans.RemoveRange(period.Plans);
-            period.Plans = plans.Select((p, i) => new ReadingPlan
-            {
-                Title = p.Title,
-                StartPage = p.StartPage,
-                EndPage = p.EndPage,
-                OrderIndex = i
-            }).ToList();
-
-            await db.SaveChangesAsync();
-            return Results.Ok(period.Plans);
+            var updatedPlans = await svc.UpdatePlansAsync(id, plans);
+            if (updatedPlans == null) return Results.NotFound();
+            return Results.Ok(updatedPlans);
         });
 
-        group.MapPut("/periods/{id}/status", async (int id, SanadDbContext db, StatusDto dto) =>
+        group.MapPut("/periods/{id}/status", async (int id, IReadingService svc, StatusDto dto) =>
         {
-            var period = await db.ReadingPeriods.FindAsync(id);
+            var period = await svc.UpdateStatusAsync(id, dto.Status);
             if (period == null) return Results.NotFound();
-
-            if (dto.Status == "Reading")
-            {
-                var otherActive = await db.ReadingPeriods.Where(p => p.Status == "Reading" && p.Id != id).ToListAsync();
-                foreach (var other in otherActive)
-                {
-                    other.Status = "Paused";
-                }
-            }
-
-            period.Status = dto.Status;
-            await db.SaveChangesAsync();
             return Results.Ok(period);
         });
 
-        group.MapGet("/current", async (SanadDbContext db) =>
+        group.MapGet("/current", async (IReadingService svc) =>
         {
-            var current = await db.ReadingPeriods
-                .Include(p => p.Book)
-                .Include(p => p.Plans)
-                .Include(p => p.Logs)
-                .Where(p => p.Status == "Reading")
-                .OrderByDescending(p => p.StartDate)
-                .FirstOrDefaultAsync();
-
-            if (current == null) return Results.NotFound();
-
-            var highestPage = current.Logs.Any() ? current.Logs.Max(l => l.EndPage) : 0;
-            var currentPlan = current.Plans.OrderBy(p => p.OrderIndex)
-                .FirstOrDefault(p => highestPage >= p.StartPage && highestPage < p.EndPage) 
-                ?? current.Plans.OrderBy(p => p.OrderIndex).FirstOrDefault(p => highestPage < p.StartPage)
-                ?? current.Plans.LastOrDefault();
-
-            return Results.Ok(new 
-            {
-                Period = current,
-                CurrentPage = highestPage,
-                CurrentChapter = currentPlan?.Title,
-                PagesLeftInChapter = currentPlan != null ? (currentPlan.EndPage - highestPage) : 0
-            });
+            var progress = await svc.GetCurrentReadingAsync();
+            if (progress == null) return Results.NotFound();
+            return Results.Ok(progress);
         });
 
-        group.MapDelete("/periods/{id}", async (int id, SanadDbContext db) =>
+        group.MapDelete("/periods/{id}", async (int id, IReadingService svc) =>
         {
-            var period = await db.ReadingPeriods.FindAsync(id);
-            if (period == null) return Results.NotFound();
-
-            db.ReadingPeriods.Remove(period);
-            await db.SaveChangesAsync();
+            var success = await svc.DeleteReadingPeriodAsync(id);
+            if (!success) return Results.NotFound();
             return Results.NoContent();
         });
     }
 
-    public record StartPeriodDto(int BookId, List<PlanDto> Plans);
-    public record PlanDto(string Title, int StartPage, int EndPage);
+    public record StartPeriodDto(int BookId, List<Sanad.Api.Services.PlanDto> Plans);
+    public record PlanDto(string Title, int StartPage, int EndPage) : Sanad.Api.Services.PlanDto(Title, StartPage, EndPage);
     public record LogDto(int ReadingPeriodId, int StartPage, int EndPage);
     public record StatusDto(string Status);
 }

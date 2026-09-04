@@ -1,6 +1,12 @@
-using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Sanad.Api.Data;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -8,111 +14,61 @@ public static class DebtEndpoints
 {
     public static void MapDebtEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/api/finances/debts", GetDebts);
-        app.MapPost("/api/finances/debts", CreateDebt);
-        app.MapPut("/api/finances/debts/{id}", UpdateDebt);
-        app.MapDelete("/api/finances/debts/{id}", DeleteDebt);
-        app.MapPut("/api/finances/debts/reorder", ReorderDebts);
-        app.MapGet("/api/finances/debts/history", GetDebtsHistory);
+        app.MapGet("/api/finances/debts", (IDebtService svc) => GetDebts(svc));
+        app.MapPost("/api/finances/debts", (IDebtService svc, Debt debt) => CreateDebt(svc, debt));
+        app.MapPut("/api/finances/debts/{id}", (IDebtService svc, Guid id, Debt updated) => UpdateDebt(svc, id, updated));
+        app.MapDelete("/api/finances/debts/{id}", (IDebtService svc, Guid id) => DeleteDebt(svc, id));
+        app.MapPut("/api/finances/debts/reorder", (IDebtService svc, List<Guid> orderedIds) => ReorderDebts(svc, orderedIds));
+        app.MapGet("/api/finances/debts/history", (IDebtService svc) => GetDebtsHistory(svc));
     }
 
-    public static async Task<IResult> GetDebts(SanadDbContext db) => 
-        Results.Ok(await db.Debts.Include(d => d.Currency).OrderBy(d => d.Order).ThenByDescending(d => d.CreatedAt).ToListAsync());
+    public static async Task<IResult> GetDebts(IDebtService svc) =>
+        Results.Ok(await svc.GetDebtsAsync());
 
-    public static async Task<IResult> CreateDebt(SanadDbContext db, Debt debt)
+    public static Task<IResult> GetDebts(SanadDbContext db) =>
+        GetDebts(new DebtService(db));
+
+    public static async Task<IResult> CreateDebt(IDebtService svc, Debt debt)
     {
-        debt.Id = Guid.NewGuid();
-        debt.CreatedAt = DateTime.UtcNow;
-        debt.UpdatedAt = DateTime.UtcNow;
-        debt.Order = (await db.Debts.MaxAsync(d => (int?)d.Order) ?? 0) + 1;
-        
-        db.Debts.Add(debt);
-        
-        var snapshot = new DebtSnapshot
-        {
-            DebtId = debt.Id,
-            Amount = debt.CurrentAmount,
-            RecordedAt = DateTime.UtcNow
-        };
-        db.DebtSnapshots.Add(snapshot);
-        
-        await db.SaveChangesAsync();
-        return Results.Created($"/api/finances/debts/{debt.Id}", debt);
+        var created = await svc.CreateDebtAsync(debt);
+        return Results.Created($"/api/finances/debts/{created.Id}", created);
     }
 
-    public static async Task<IResult> UpdateDebt(SanadDbContext db, Guid id, Debt updated)
+    public static Task<IResult> CreateDebt(SanadDbContext db, Debt debt) =>
+        CreateDebt(new DebtService(db), debt);
+
+    public static async Task<IResult> UpdateDebt(IDebtService svc, Guid id, Debt updated)
     {
-        var debt = await db.Debts.FindAsync(id);
+        var debt = await svc.UpdateDebtAsync(id, updated);
         if (debt is null) return Results.NotFound();
-
-        debt.Name = updated.Name;
-        debt.Type = updated.Type;
-        debt.CurrencyId = updated.CurrencyId;
-        debt.Icon = updated.Icon;
-        
-        if (debt.CurrentAmount != updated.CurrentAmount)
-        {
-            debt.CurrentAmount = updated.CurrentAmount;
-            
-            var snapshot = new DebtSnapshot
-            {
-                DebtId = debt.Id,
-                Amount = debt.CurrentAmount,
-                RecordedAt = DateTime.UtcNow
-            };
-            db.DebtSnapshots.Add(snapshot);
-        }
-
-        debt.UpdatedAt = DateTime.UtcNow;
-
-        await db.SaveChangesAsync();
         return Results.Ok(debt);
     }
 
-    public static async Task<IResult> DeleteDebt(SanadDbContext db, Guid id)
+    public static Task<IResult> UpdateDebt(SanadDbContext db, Guid id, Debt updated) =>
+        UpdateDebt(new DebtService(db), id, updated);
+
+    public static async Task<IResult> DeleteDebt(IDebtService svc, Guid id)
     {
-        var debt = await db.Debts.FindAsync(id);
-        if (debt is null) return Results.NotFound();
-
-        var snapshots = await db.DebtSnapshots.Where(s => s.DebtId == id).ToListAsync();
-        db.DebtSnapshots.RemoveRange(snapshots);
-
-        db.Debts.Remove(debt);
-        await db.SaveChangesAsync();
+        var success = await svc.DeleteDebtAsync(id);
+        if (!success) return Results.NotFound();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> ReorderDebts(SanadDbContext db, List<Guid> orderedIds)
+    public static Task<IResult> DeleteDebt(SanadDbContext db, Guid id) =>
+        DeleteDebt(new DebtService(db), id);
+
+    public static async Task<IResult> ReorderDebts(IDebtService svc, List<Guid> orderedIds)
     {
-        var debts = await db.Debts.Where(d => orderedIds.Contains(d.Id)).ToListAsync();
-        for (int i = 0; i < orderedIds.Count; i++)
-        {
-            var debt = debts.FirstOrDefault(d => d.Id == orderedIds[i]);
-            if (debt != null)
-            {
-                debt.Order = i;
-            }
-        }
-        await db.SaveChangesAsync();
+        await svc.ReorderDebtsAsync(orderedIds);
         return Results.Ok();
     }
 
-    public static async Task<IResult> GetDebtsHistory(SanadDbContext db)
-    {
-        var snapshots = await db.DebtSnapshots
-            .Include(s => s.Debt)
-                .ThenInclude(d => d!.Currency)
-            .OrderBy(s => s.RecordedAt)
-            .ToListAsync();
-            
-        return Results.Ok(snapshots.Select(s => new {
-            s.Id,
-            s.DebtId,
-            DebtName = s.Debt?.Name,
-            DebtType = s.Debt?.Type,
-            s.Amount,
-            ExchangeRateToDefault = s.Debt?.Currency?.ExchangeRateToDefault ?? 1m,
-            s.RecordedAt
-        }));
-    }
+    public static Task<IResult> ReorderDebts(SanadDbContext db, List<Guid> orderedIds) =>
+        ReorderDebts(new DebtService(db), orderedIds);
+
+    public static async Task<IResult> GetDebtsHistory(IDebtService svc) =>
+        Results.Ok(await svc.GetDebtsHistoryAsync());
+
+    public static Task<IResult> GetDebtsHistory(SanadDbContext db) =>
+        GetDebtsHistory(new DebtService(db));
 }

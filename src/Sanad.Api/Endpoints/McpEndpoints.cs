@@ -1,963 +1,320 @@
 using System.ComponentModel;
-using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
-using Sanad.Api.Data;
 using Sanad.Api.Models;
-
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
 [McpServerToolType]
 public class McpEndpoints
 {
-    private readonly SanadDbContext _db;
-    private readonly Services.IBookSearchService _searchService;
-    private readonly Services.FileManagerService _fileManager;
+    private readonly IStorageService _storageService;
+    private readonly IThoughtService _thoughtService;
+    private readonly ITaskService _taskService;
+    private readonly IFinanceService _financeService;
+    private readonly IDebtService _debtService;
+    private readonly INoteService _noteService;
+    private readonly IBookService _bookService;
+    private readonly IBookSearchService _searchService;
+    private readonly IReadingService _readingService;
+    private readonly IGoalService _goalService;
+    private readonly IHabitService _habitService;
+    private readonly ICalendarService _calendarService;
+    private readonly IAppService _appService;
+    private readonly FileManagerService _fileManager;
+    private readonly ITenantProvider _tenantProvider;
 
-    private readonly Services.ITenantProvider _tenantProvider;
-    private readonly Services.DiskQuotaService _quotaService;
-    private readonly AdminDbContext _adminDb;
-
-    public McpEndpoints(SanadDbContext db, Services.IBookSearchService searchService, Services.FileManagerService fileManager, Services.ITenantProvider tenantProvider, Services.DiskQuotaService quotaService, AdminDbContext adminDb)
+    public McpEndpoints(
+        IStorageService storageService,
+        IThoughtService thoughtService,
+        ITaskService taskService,
+        IFinanceService financeService,
+        IDebtService debtService,
+        INoteService noteService,
+        IBookService bookService,
+        IBookSearchService searchService,
+        IReadingService readingService,
+        IGoalService goalService,
+        IHabitService habitService,
+        ICalendarService calendarService,
+        IAppService appService,
+        FileManagerService fileManager,
+        ITenantProvider tenantProvider)
     {
-        _db = db;
+        _storageService = storageService;
+        _thoughtService = thoughtService;
+        _taskService = taskService;
+        _financeService = financeService;
+        _debtService = debtService;
+        _noteService = noteService;
+        _bookService = bookService;
         _searchService = searchService;
+        _readingService = readingService;
+        _goalService = goalService;
+        _habitService = habitService;
+        _calendarService = calendarService;
+        _appService = appService;
         _fileManager = fileManager;
         _tenantProvider = tenantProvider;
-        _quotaService = quotaService;
-        _adminDb = adminDb;
     }
 
-
-
-    [McpServerTool, Description("Get all available storage tiers")]
-    public async Task<List<StorageTier>> GetTiers()
+    public McpEndpoints(
+        Sanad.Api.Data.SanadDbContext db,
+        IBookSearchService searchService,
+        FileManagerService fileManager,
+        ITenantProvider tenantProvider,
+        DiskQuotaService quotaService,
+        Sanad.Api.Data.AdminDbContext adminDb)
+        : this(
+            new StorageService(adminDb, quotaService),
+            new ThoughtService(db),
+            new TaskService(db, tenantProvider, quotaService),
+            new FinanceService(db),
+            new DebtService(db),
+            new NoteService(db, tenantProvider),
+            new BookService(db),
+            searchService,
+            new ReadingService(db),
+            new GoalService(db),
+            new HabitService(db),
+            new CalendarService(db),
+            new AppService(db),
+            fileManager,
+            tenantProvider)
     {
-        return await _adminDb.Tiers.ToListAsync();
     }
+
+    // Storage Tools
+    [McpServerTool, Description("Get all available storage tiers")]
+    public async Task<List<StorageTier>> GetTiers() => await _storageService.GetTiersAsync();
 
     [McpServerTool, Description("Get current storage status for the authenticated user")]
-    public async Task<object> GetStorageStatus()
-    {
-        var username = _tenantProvider.GetUsername();
-        var user = await _adminDb.Users.Include(u => u.Tier).FirstOrDefaultAsync(u => u.Username == username);
-        
-        if (user == null) throw new Exception("User not found");
-
-        var userPath = Path.Combine(Directory.GetCurrentDirectory(), "Data", username);
-        var diskUsed = _quotaService.GetDirectorySize(userPath);
-        var diskLimitBytes = user.Tier?.DiskLimitBytes ?? (1L * Constants.BytesPerKb * Constants.BytesPerKb * Constants.BytesPerKb);
-
-        return new 
-        {
-            DiskUsedBytes = diskUsed,
-            DiskLimitBytes = diskLimitBytes,
-            TierName = user.Tier?.Name ?? "Unknown",
-            IsAdmin = user.IsAdmin
-        };
-    }
+    public async Task<object> GetStorageStatus() => await _storageService.GetStorageStatusAsync(_tenantProvider.GetUsername());
 
     // Thoughts Tools
     [McpServerTool, Description("Get a list of thoughts")]
-    public async Task<List<Thought>> GetThoughts()
-    {
-        return await _db.Thoughts.OrderByDescending(t => t.CreatedAt).Take(20).ToListAsync();
-    }
+    public async Task<List<Thought>> GetThoughts() => await _thoughtService.GetThoughtsAsync(1, 20);
 
     [McpServerTool, Description("Create a new thought")]
-    public async Task<Thought> CreateThought(string content)
-    {
-        var thought = new Thought { Content = content };
-        _db.Thoughts.Add(thought);
-        await _db.SaveChangesAsync();
-        return thought;
-    }
+    public async Task<Thought> CreateThought(string content) => await _thoughtService.CreateThoughtAsync(content);
 
     [McpServerTool, Description("Delete a thought by ID")]
-    public async Task<bool> DeleteThought(string id)
-    {
-        var thought = await _db.Thoughts.FindAsync(id);
-        if (thought != null)
-        {
-            _db.Thoughts.Remove(thought);
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> DeleteThought(string id) => await _thoughtService.DeleteThoughtAsync(id);
 
     // Tasks Tools
     [McpServerTool, Description("Get a list of tasks")]
-    public async Task<List<TaskItem>> GetTasks(string? project = null, Sanad.Api.Models.TaskStatus? status = null, bool? unscheduledOnly = null)
-    {
-        var query = _db.TaskItems.AsQueryable();
-        if (!string.IsNullOrEmpty(project))
-        {
-            if (project == "__NONE__" || project.Equals("NONE", StringComparison.OrdinalIgnoreCase))
-                query = query.Where(t => string.IsNullOrEmpty(t.Project));
-            else
-                query = query.Where(t => t.Project == project);
-        }
-        if (status.HasValue)
-            query = query.Where(t => t.Status == status.Value);
-            
-        if (unscheduledOnly == true)
-            query = query.Where(t => t.StartDate == null);
-        
-        return await query.OrderBy(t => t.Order).ThenByDescending(t => t.CreatedAt).ToListAsync();
-    }
+    public async Task<List<TaskItem>> GetTasks(string? project = null, Models.TaskStatus? status = null, bool? unscheduledOnly = null) =>
+        await _taskService.GetTasksAsync(project, status, unscheduledOnly);
 
     [McpServerTool, Description("Create a new task")]
-    public async Task<TaskItem> CreateTask(string title, string? content = null, string? project = null)
-    {
-        var task = new TaskItem { Title = title, Content = content, Project = project, Status = Models.TaskStatus.ToDo };
-        _db.TaskItems.Add(task);
-        await _db.SaveChangesAsync();
-        return task;
-    }
+    public async Task<TaskItem> CreateTask(string title, string? content = null, string? project = null) =>
+        await _taskService.CreateTaskAsync(new TaskItem { Title = title, Content = content, Project = project, Status = Models.TaskStatus.ToDo });
 
     [McpServerTool, Description("Delete a task by ID")]
-    public async Task<bool> DeleteTask(Guid id)
-    {
-        var task = await _db.TaskItems.FindAsync(id);
-        if (task != null)
-        {
-            _db.TaskItems.Remove(task);
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> DeleteTask(Guid id) => await _taskService.DeleteTaskAsync(id);
 
     [McpServerTool, Description("Get specific task details including comments and attachments")]
-    public async Task<object?> GetTaskDetails(Guid id)
-    {
-        var task = await _db.TaskItems
-            .Include(t => t.Comments.OrderBy(c => c.CreatedAt))
-            .Include(t => t.Attachments)
-            .AsNoTracking()
-            .FirstOrDefaultAsync(t => t.Id == id);
-            
-        if (task == null) return null;
-        return task;
-    }
+    public async Task<object?> GetTaskDetails(Guid id) => await _taskService.GetTaskDetailsAsync(id);
 
     [McpServerTool, Description("Update the status of a specific task (e.g. ToDo, InProgress, Done)")]
-    public async Task<bool> UpdateTaskStatus(Guid taskId, string statusStr)
-    {
-        var task = await _db.TaskItems.FindAsync(taskId);
-        if (task == null) return false;
-        
-        if (Enum.TryParse<Sanad.Api.Models.TaskStatus>(statusStr, true, out var newStatus))
-        {
-            task.Status = newStatus;
-            task.UpdatedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> UpdateTaskStatus(Guid taskId, string statusStr) => await _taskService.UpdateTaskStatusAsync(taskId, statusStr);
 
     [McpServerTool, Description("Add a rich-text comment to a task")]
-    public async Task<TaskComment?> AddTaskComment(Guid taskId, string text)
-    {
-        var taskExists = await _db.TaskItems.AnyAsync(t => t.Id == taskId);
-        if (!taskExists) return null;
-
-        var comment = new TaskComment { TaskItemId = taskId, Text = text };
-        _db.TaskComments.Add(comment);
-        await _db.SaveChangesAsync();
-        return comment;
-    }
+    public async Task<TaskComment?> AddTaskComment(Guid taskId, string text) => await _taskService.AddCommentAsync(taskId, text);
 
     [McpServerTool, Description("Delete a specific task comment")]
-    public async Task<bool> DeleteTaskComment(Guid commentId)
-    {
-        var comment = await _db.TaskComments.FindAsync(commentId);
-        if (comment == null) return false;
-
-        _db.TaskComments.Remove(comment);
-        await _db.SaveChangesAsync();
-        return true;
-    }
+    public async Task<bool> DeleteTaskComment(Guid commentId) => await _taskService.DeleteCommentAsync(commentId);
 
     [McpServerTool, Description("Attach a local file to a task. Provide the absolute file path on disk.")]
-    public async Task<TaskAttachment?> AttachFileToTask(Guid taskId, string localFilePath)
-    {
-        var taskExists = await _db.TaskItems.AnyAsync(t => t.Id == taskId);
-        if (!taskExists || !File.Exists(localFilePath)) return null;
-
-        var fileInfo = new System.IO.FileInfo(localFilePath);
-        var username = _tenantProvider.GetUsername();
-        
-        var canUpload = await _quotaService.CanUploadAsync(username, fileInfo.Length);
-        if (!canUpload) return null;
-        var uploadsDir = Path.Combine(Directory.GetCurrentDirectory(), "Data", username, "attachments");
-        Directory.CreateDirectory(uploadsDir);
-
-        var fileName = Path.GetFileName(localFilePath);
-        var (uniqueFileName, destPath) = Utils.FileUtils.GenerateUniqueFile(uploadsDir, Path.GetExtension(localFilePath));
-
-        try
-        {
-            using var sourceStream = new System.IO.FileStream(localFilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true);
-            using var destinationStream = new System.IO.FileStream(destPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, true);
-            await sourceStream.CopyToAsync(destinationStream);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-
-        var attachment = new TaskAttachment
-        {
-            TaskItemId = taskId,
-            FileName = fileName,
-            FilePath = $"/api/attachments/{uniqueFileName}"
-        };
-        _db.TaskAttachments.Add(attachment);
-        await _db.SaveChangesAsync();
-        return attachment;
-    }
+    public async Task<TaskAttachment?> AttachFileToTask(Guid taskId, string localFilePath) => await _taskService.AttachLocalFileAsync(taskId, localFilePath);
 
     [McpServerTool, Description("Delete a specific task attachment")]
-    public async Task<bool> DeleteTaskAttachment(Guid attachmentId)
-    {
-        var attachment = await _db.TaskAttachments.FindAsync(attachmentId);
-        if (attachment == null) return false;
-
-        var username = _tenantProvider.GetUsername();
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Data", username, attachment.FilePath.TrimStart('/'));
-
-        _db.TaskAttachments.Remove(attachment);
-        await _db.SaveChangesAsync();
-
-        if (File.Exists(filePath))
-        {
-            try
-            {
-                File.Delete(filePath);
-            }
-            catch (Exception)
-            {
-                // Ignore file deletion error if DB update succeeded
-            }
-        }
-
-        return true;
-    }
+    public async Task<bool> DeleteTaskAttachment(Guid attachmentId) => await _taskService.DeleteAttachmentAsync(attachmentId);
 
     // Transactions Tools
     [McpServerTool, Description("Get transaction categories")]
-    public async Task<List<TransactionCategory>> GetCategories()
-    {
-        return await _db.TransactionCategories.ToListAsync();
-    }
+    public async Task<List<TransactionCategory>> GetCategories() => await _financeService.GetCategoriesAsync();
 
     [McpServerTool, Description("Create a transaction category")]
-    public async Task<TransactionCategory> CreateCategory(string name, decimal monthlyBudget, string colorHex = "#cccccc")
-    {
-        var category = new TransactionCategory { Name = name, MonthlyBudget = monthlyBudget, ColorHex = colorHex };
-        _db.TransactionCategories.Add(category);
-        await _db.SaveChangesAsync();
-        return category;
-    }
+    public async Task<TransactionCategory> CreateCategory(string name, decimal monthlyBudget, string colorHex = "#cccccc") =>
+        await _financeService.CreateCategoryAsync(name, monthlyBudget, colorHex);
 
     [McpServerTool, Description("Get recent transactions")]
-    public async Task<List<Transaction>> GetTransactions()
-    {
-        return await _db.Transactions.OrderByDescending(t => t.Date).Take(20).ToListAsync();
-    }
+    public async Task<List<Transaction>> GetTransactions() => await _financeService.GetRecentTransactionsAsync(20);
 
     [McpServerTool, Description("Create a new transaction")]
-    public async Task<Transaction> CreateTransaction(decimal amount, string description, string type, Guid categoryId)
-    {
-        var tx = new Transaction { Amount = amount, CategoryId = categoryId, Description = description, Type = type, Date = DateTime.UtcNow };
-        _db.Transactions.Add(tx);
-        await _db.SaveChangesAsync();
-        return tx;
-    }
+    public async Task<Transaction> CreateTransaction(decimal amount, string description, string type, Guid categoryId) =>
+        await _financeService.CreateTransactionAsync(new Transaction { Amount = amount, CategoryId = categoryId, Description = description, Type = type, Date = DateTime.UtcNow })
+        ?? throw new InvalidOperationException("Failed to create transaction. Ensure category exists.");
 
     [McpServerTool, Description("Delete a transaction by ID")]
-    public async Task<bool> DeleteTransaction(Guid id)
-    {
-        var tx = await _db.Transactions.FindAsync(id);
-        if (tx != null)
-        {
-            _db.Transactions.Remove(tx);
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> DeleteTransaction(Guid id) => await _financeService.DeleteTransactionAsync(id);
 
     // Debts Tools
     [McpServerTool, Description("Get all debts / liabilities")]
-    public async Task<List<Debt>> GetDebts()
-    {
-        return await _db.Debts.Include(d => d.Currency).OrderBy(d => d.Order).ThenByDescending(d => d.CreatedAt).ToListAsync();
-    }
+    public async Task<List<Debt>> GetDebts() => await _debtService.GetDebtsAsync();
 
     [McpServerTool, Description("Create a new debt / liability")]
-    public async Task<Debt> CreateDebt(string name, string type, decimal currentAmount, Guid? currencyId = null, string? icon = null)
-    {
-        var debt = new Debt
-        {
-            Id = Guid.NewGuid(),
-            Name = name,
-            Type = type,
-            CurrentAmount = currentAmount,
-            CurrencyId = currencyId,
-            Icon = icon,
-            Order = (await _db.Debts.MaxAsync(d => (int?)d.Order) ?? 0) + 1,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-        _db.Debts.Add(debt);
-        var snapshot = new DebtSnapshot
-        {
-            DebtId = debt.Id,
-            Amount = debt.CurrentAmount,
-            RecordedAt = DateTime.UtcNow
-        };
-        _db.DebtSnapshots.Add(snapshot);
-        await _db.SaveChangesAsync();
-        return debt;
-    }
+    public async Task<Debt> CreateDebt(string name, string type, decimal currentAmount, Guid? currencyId = null, string? icon = null) =>
+        await _debtService.CreateDebtAsync(name, type, currentAmount, currencyId, icon);
 
     [McpServerTool, Description("Update a debt / liability")]
-    public async Task<Debt?> UpdateDebt(Guid id, string name, string type, decimal currentAmount, Guid? currencyId = null, string? icon = null)
-    {
-        var debt = await _db.Debts.FindAsync(id);
-        if (debt == null) return null;
-
-        debt.Name = name;
-        debt.Type = type;
-        debt.CurrencyId = currencyId;
-        debt.Icon = icon;
-
-        if (debt.CurrentAmount != currentAmount)
-        {
-            debt.CurrentAmount = currentAmount;
-            var snapshot = new DebtSnapshot
-            {
-                DebtId = debt.Id,
-                Amount = debt.CurrentAmount,
-                RecordedAt = DateTime.UtcNow
-            };
-            _db.DebtSnapshots.Add(snapshot);
-        }
-
-        debt.UpdatedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync();
-        return debt;
-    }
+    public async Task<Debt?> UpdateDebt(Guid id, string name, string type, decimal currentAmount, Guid? currencyId = null, string? icon = null) =>
+        await _debtService.UpdateDebtAsync(id, name, type, currentAmount, currencyId, icon);
 
     [McpServerTool, Description("Delete a debt by ID")]
-    public async Task<bool> DeleteDebt(Guid id)
-    {
-        var debt = await _db.Debts.FindAsync(id);
-        if (debt == null) return false;
-
-        var snapshots = await _db.DebtSnapshots.Where(s => s.DebtId == id).ToListAsync();
-        _db.DebtSnapshots.RemoveRange(snapshots);
-
-        _db.Debts.Remove(debt);
-        await _db.SaveChangesAsync();
-        return true;
-    }
+    public async Task<bool> DeleteDebt(Guid id) => await _debtService.DeleteDebtAsync(id);
 
     // Notes Tools
     [McpServerTool, Description("Get recent notes")]
-    public async Task<List<Note>> GetNotes()
-    {
-        return await _db.Notes.OrderByDescending(n => n.UpdatedAt).Take(20).ToListAsync();
-    }
+    public async Task<List<Note>> GetNotes() => await _noteService.GetRecentNotesAsync(20);
 
     [McpServerTool, Description("Create a new note")]
-    public async Task<Note> CreateNote(string title, string content, Guid notebookId)
-    {
-        var note = new Note { Title = title, Content = content, NotebookId = notebookId };
-        _db.Notes.Add(note);
-        await _db.SaveChangesAsync();
-        return note;
-    }
+    public async Task<Note> CreateNote(string title, string content, Guid notebookId) =>
+        await _noteService.CreateNoteAsync(notebookId, title, content) ?? throw new InvalidOperationException("Notebook not found");
 
     [McpServerTool, Description("Delete a note by ID")]
-    public async Task<bool> DeleteNote(Guid id)
-    {
-        var note = await _db.Notes.FindAsync(id);
-        if (note != null)
-        {
-            _db.Notes.Remove(note);
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> DeleteNote(Guid id) => await _noteService.DeleteNoteAsync(id);
 
     // Books Tools
     [McpServerTool, Description("Get all books")]
-    public async Task<List<Book>> GetBooks()
-    {
-        return await _db.Books.OrderByDescending(b => b.CreatedAt).ToListAsync();
-    }
+    public async Task<List<Book>> GetBooks() => await _bookService.GetBooksAsync();
 
     [McpServerTool, Description("Create a new book")]
-    public async Task<Book> CreateBook(string title, string author, string coverUrl, int totalPages)
-    {
-        var book = new Book { Title = title, Author = author, CoverUrl = coverUrl, TotalPages = totalPages };
-        _db.Books.Add(book);
-        await _db.SaveChangesAsync();
-        return book;
-    }
+    public async Task<Book> CreateBook(string title, string author, string coverUrl, int totalPages) =>
+        await _bookService.CreateBookAsync(title, author, coverUrl, totalPages);
 
     [McpServerTool, Description("Search for books from external sources (Google Books, OpenLibrary, Apple Books)")]
-    public async Task<List<Sanad.Api.Services.BookSearchResult>> SearchBooks(string query)
-    {
-        return await _searchService.SearchBooksAsync(query);
-    }
+    public async Task<List<BookSearchResult>> SearchBooks(string query) => await _searchService.SearchBooksAsync(query);
 
     [McpServerTool, Description("Update an existing book")]
-    public async Task<Book?> UpdateBook(int id, string title, string author, string coverUrl, int totalPages)
-    {
-        var book = await _db.Books.FindAsync(id);
-        if (book != null)
-        {
-            book.Title = title;
-            book.Author = author;
-            book.CoverUrl = coverUrl;
-            book.TotalPages = totalPages;
-            await _db.SaveChangesAsync();
-        }
-        return book;
-    }
+    public async Task<Book?> UpdateBook(int id, string title, string author, string coverUrl, int totalPages) =>
+        await _bookService.UpdateBookAsync(id, title, author, coverUrl, totalPages);
 
     [McpServerTool, Description("Delete a book by ID")]
-    public async Task<bool> DeleteBook(int id)
-    {
-        var book = await _db.Books.FindAsync(id);
-        if (book != null)
-        {
-            _db.Books.Remove(book);
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> DeleteBook(int id) => await _bookService.DeleteBookAsync(id);
 
     // Reading Tools
     [McpServerTool, Description("Get all reading periods")]
-    public async Task<List<ReadingPeriod>> GetReadingPeriods()
-    {
-        return await _db.ReadingPeriods
-            .Include(p => p.Book)
-            .Include(p => p.Plans)
-            .Include(p => p.Logs)
-            .OrderByDescending(p => p.StartDate)
-            .ToListAsync();
-    }
+    public async Task<List<ReadingPeriod>> GetReadingPeriods() => await _readingService.GetReadingPeriodsAsync();
 
     [McpServerTool, Description("Get current active reading period")]
-    public async Task<object?> GetCurrentReading()
-    {
-        var current = await _db.ReadingPeriods
-            .Include(p => p.Book)
-            .Include(p => p.Plans)
-            .Include(p => p.Logs)
-            .Where(p => p.Status == "Reading")
-            .OrderByDescending(p => p.StartDate)
-            .FirstOrDefaultAsync();
-
-        if (current == null) return null;
-
-        var highestPage = current.Logs.Any() ? current.Logs.Max(l => l.EndPage) : 0;
-        var currentPlan = current.Plans.OrderBy(p => p.OrderIndex)
-            .FirstOrDefault(p => highestPage >= p.StartPage && highestPage < p.EndPage) 
-            ?? current.Plans.OrderBy(p => p.OrderIndex).FirstOrDefault(p => highestPage < p.StartPage)
-            ?? current.Plans.LastOrDefault();
-
-        return new 
-        {
-            Period = current,
-            CurrentPage = highestPage,
-            CurrentChapter = currentPlan?.Title,
-            PagesLeftInChapter = currentPlan != null ? (currentPlan.EndPage - highestPage) : 0
-        };
-    }
+    public async Task<object?> GetCurrentReading() => await _readingService.GetCurrentReadingAsync();
 
     [McpServerTool, Description("Start a new reading period")]
-    public async Task<ReadingPeriod> StartReadingPeriod(int bookId)
-    {
-        var period = new ReadingPeriod
-        {
-            BookId = bookId,
-            Status = "Reading",
-            StartDate = DateTime.UtcNow,
-            Plans = new List<ReadingPlan>()
-        };
-        _db.ReadingPeriods.Add(period);
-        await _db.SaveChangesAsync();
-        return period;
-    }
+    public async Task<ReadingPeriod> StartReadingPeriod(int bookId) => await _readingService.StartReadingPeriodAsync(bookId);
 
     [McpServerTool, Description("Log reading progress")]
-    public async Task<ReadingLog?> LogReading(int readingPeriodId, int startPage, int endPage)
-    {
-        var period = await _db.ReadingPeriods
-            .Include(p => p.Book)
-            .FirstOrDefaultAsync(p => p.Id == readingPeriodId);
-            
-        if (period == null) return null;
-
-        var log = new ReadingLog
-        {
-            ReadingPeriodId = readingPeriodId,
-            Date = DateTime.UtcNow,
-            StartPage = startPage,
-            EndPage = endPage
-        };
-        _db.ReadingLogs.Add(log);
-
-        if (endPage >= period.Book.TotalPages)
-        {
-            period.Status = "Completed";
-            period.EndDate = DateTime.UtcNow;
-        }
-
-        await _db.SaveChangesAsync();
-        return log;
-    }
+    public async Task<ReadingLog?> LogReading(int readingPeriodId, int startPage, int endPage) =>
+        await _readingService.LogReadingAsync(readingPeriodId, startPage, endPage);
 
     [McpServerTool, Description("Update reading status (e.g. Reading, Paused, Completed)")]
-    public async Task<ReadingPeriod?> UpdateReadingStatus(int id, string status)
-    {
-        var period = await _db.ReadingPeriods.FindAsync(id);
-        if (period == null) return null;
-
-        if (status == "Reading")
-        {
-            var otherActive = await _db.ReadingPeriods.Where(p => p.Status == "Reading" && p.Id != id).ToListAsync();
-            foreach (var other in otherActive)
-            {
-                other.Status = "Paused";
-            }
-        }
-
-        period.Status = status;
-        await _db.SaveChangesAsync();
-        return period;
-    }
+    public async Task<ReadingPeriod?> UpdateReadingStatus(int id, string status) => await _readingService.UpdateStatusAsync(id, status);
 
     [McpServerTool, Description("Update reading plans for a period")]
-    public async Task<List<ReadingPlan>?> UpdateReadingPlans(int id, List<ReadingEndpoints.PlanDto> plans)
-    {
-        var period = await _db.ReadingPeriods.Include(p => p.Plans).FirstOrDefaultAsync(p => p.Id == id);
-        if (period == null) return null;
-
-        _db.ReadingPlans.RemoveRange(period.Plans);
-        period.Plans = plans.Select((p, i) => new ReadingPlan
-        {
-            Title = p.Title,
-            StartPage = p.StartPage,
-            EndPage = p.EndPage,
-            OrderIndex = i
-        }).ToList();
-
-        await _db.SaveChangesAsync();
-        return period.Plans;
-    }
+    public async Task<List<ReadingPlan>?> UpdateReadingPlans(int id, List<PlanDto> plans) => await _readingService.UpdatePlansAsync(id, plans);
 
     [McpServerTool, Description("Delete a reading period")]
-    public async Task<bool> DeleteReadingPeriod(int id)
-    {
-        var period = await _db.ReadingPeriods.FindAsync(id);
-        if (period != null)
-        {
-            _db.ReadingPeriods.Remove(period);
-            await _db.SaveChangesAsync();
-            return true;
-        }
-        return false;
-    }
+    public async Task<bool> DeleteReadingPeriod(int id) => await _readingService.DeleteReadingPeriodAsync(id);
 
     // Goals Tools
     [McpServerTool, Description("Get today's goal")]
-    public async Task<DailyGoal?> GetTodaysGoal()
-    {
-        var dateStr = DateTime.Now.ToString("yyyy-MM-dd");
-        return await _db.DailyGoals.FindAsync(dateStr);
-    }
+    public async Task<DailyGoal?> GetTodaysGoal() => await _goalService.GetTodaysGoalAsync();
 
     [McpServerTool, Description("Set today's goal")]
-    public async Task<DailyGoal> SetTodaysGoal(string goalText)
-    {
-        var dateStr = DateTime.Now.ToString("yyyy-MM-dd");
-        var goal = await _db.DailyGoals.FindAsync(dateStr);
-        if (goal == null)
-        {
-            goal = new DailyGoal { DateStr = dateStr, Goal = goalText };
-            _db.DailyGoals.Add(goal);
-        }
-        else
-        {
-            goal.Goal = goalText;
-        }
-        await _db.SaveChangesAsync();
-        return goal;
-    }
+    public async Task<DailyGoal> SetTodaysGoal(string goalText) =>
+        await _goalService.SetGoalAsync(DateTime.Now.ToString("yyyy-MM-dd"), goalText);
 
     // Habits Tools
     [McpServerTool, Description("Get all habits and their logs")]
-    public async Task<List<Habit>> GetHabits()
-    {
-        return await _db.Habits
-            .Include(h => h.Logs)
-            .Where(h => !h.IsDeleted)
-            .OrderBy(h => h.Order)
-            .ThenByDescending(h => h.CreatedAt)
-            .ToListAsync();
-    }
+    public async Task<List<Habit>> GetHabits() => await _habitService.GetHabitsAsync();
 
     [McpServerTool, Description("Create a new habit")]
-    public async Task<Habit> CreateHabit(string name, string icon, string frequency)
-    {
-        var habit = new Habit
-        {
-            Id = Guid.NewGuid().ToString(),
-            Name = name,
-            Icon = icon,
-            Frequency = frequency,
-            CreatedAt = DateTime.UtcNow
-        };
-        _db.Habits.Add(habit);
-        await _db.SaveChangesAsync();
-        return habit;
-    }
+    public async Task<Habit> CreateHabit(string name, string icon, string frequency) =>
+        await _habitService.CreateHabitAsync(name, icon, frequency);
 
     [McpServerTool, Description("Update an existing habit")]
-    public async Task<Habit?> UpdateHabit(string id, string name, string icon, string frequency)
-    {
-        var habit = await _db.Habits.FindAsync(id);
-        if (habit == null || habit.IsDeleted) return null;
-
-        habit.Name = name;
-        habit.Icon = icon;
-        habit.Frequency = frequency;
-
-        await _db.SaveChangesAsync();
-        return habit;
-    }
+    public async Task<Habit?> UpdateHabit(string id, string name, string icon, string frequency) =>
+        await _habitService.UpdateHabitAsync(id, name, icon, frequency);
 
     [McpServerTool, Description("Delete a habit by ID")]
-    public async Task<bool> DeleteHabit(string id)
-    {
-        var habit = await _db.Habits.FindAsync(id);
-        if (habit == null || habit.IsDeleted) return false;
-
-        habit.IsDeleted = true;
-        await _db.SaveChangesAsync();
-        return true;
-    }
+    public async Task<bool> DeleteHabit(string id) => await _habitService.DeleteHabitAsync(id);
 
     [McpServerTool, Description("Toggle habit completion for a specific date")]
-    public async Task<HabitLog?> ToggleHabitLog(string id, DateTime date)
-    {
-        var habit = await _db.Habits.FindAsync(id);
-        if (habit == null || habit.IsDeleted) return null;
-
-        var targetDate = date.Date;
-        var log = await _db.HabitLogs.FirstOrDefaultAsync(l => l.HabitId == id && l.Date.Date == targetDate);
-        if (log != null)
-        {
-            log.Completed = !log.Completed;
-        }
-        else
-        {
-            log = new HabitLog
-            {
-                Id = Guid.NewGuid().ToString(),
-                HabitId = id,
-                Date = targetDate,
-                Completed = true
-            };
-            _db.HabitLogs.Add(log);
-        }
-
-        await _db.SaveChangesAsync();
-        return log;
-    }
+    public async Task<HabitLog?> ToggleHabitLog(string id, DateTime date) => await _habitService.ToggleHabitLogAsync(id, date);
 
     [McpServerTool, Description("Reorder habits using a list of their IDs")]
-    public async Task<bool> ReorderHabits(List<string> habitIds)
-    {
-        var habits = await _db.Habits.Where(h => habitIds.Contains(h.Id)).ToListAsync();
-        
-        for (int i = 0; i < habitIds.Count; i++)
-        {
-            var habit = habits.FirstOrDefault(h => h.Id == habitIds[i]);
-            if (habit != null)
-            {
-                habit.Order = i;
-            }
-        }
-
-        await _db.SaveChangesAsync();
-        return true;
-    }
+    public async Task<bool> ReorderHabits(List<string> habitIds) => await _habitService.ReorderHabitsAsync(habitIds);
 
     // File Manager Tools
     [McpServerTool, Description("Get contents of a specific folder in the File Manager. If folderId is null, returns the root folder.")]
-    public async Task<object> GetFolderContents(int? folderId = null)
-    {
-        return await _fileManager.GetFolderContentsAsync(folderId);
-    }
+    public async Task<object> GetFolderContents(int? folderId = null) => await _fileManager.GetFolderContentsAsync(folderId);
 
     [McpServerTool, Description("Search for files and folders in the File Manager by name.")]
-    public async Task<object> SearchFiles(string query)
-    {
-        return await _fileManager.SearchFilesAsync(query);
-    }
+    public async Task<object> SearchFiles(string query) => await _fileManager.SearchFilesAsync(query);
 
     [McpServerTool, Description("Upload a local file from disk to the File Manager. Provide the absolute local file path.")]
-    public async Task<FileItem?> UploadFileToSanad(string localFilePath, int? folderId = null)
-    {
-        return await _fileManager.UploadLocalFileAsync(localFilePath, folderId);
-    }
+    public async Task<FileItem?> UploadFileToSanad(string localFilePath, int? folderId = null) =>
+        await _fileManager.UploadLocalFileAsync(localFilePath, folderId);
 
     [McpServerTool, Description("Upload a local folder (recursively) to the File Manager. Provide the absolute local folder path and optionally the target parent Folder ID.")]
-    public async Task<Folder?> UploadFolderToSanad(string localFolderPath, int? targetParentId = null)
-    {
-        return await _fileManager.UploadLocalFolderAsync(localFolderPath, targetParentId);
-    }
+    public async Task<Folder?> UploadFolderToSanad(string localFolderPath, int? targetParentId = null) =>
+        await _fileManager.UploadLocalFolderAsync(localFolderPath, targetParentId);
 
     [McpServerTool, Description("Download a file from the File Manager to a local directory. Provide the File ID and destination absolute path (or directory).")]
-    public async Task<bool> DownloadFileFromSanad(int fileId, string destinationPath)
-    {
-        return await _fileManager.DownloadFileToLocalAsync(fileId, destinationPath);
-    }
+    public async Task<bool> DownloadFileFromSanad(int fileId, string destinationPath) =>
+        await _fileManager.DownloadFileToLocalAsync(fileId, destinationPath);
 
     [McpServerTool, Description("Download an entire folder (recursively) from the File Manager to a local directory.")]
-    public async Task<bool> DownloadFolderFromSanad(int folderId, string destinationDirectory)
-    {
-        return await _fileManager.DownloadFolderToLocalAsync(folderId, destinationDirectory);
-    }
+    public async Task<bool> DownloadFolderFromSanad(int folderId, string destinationDirectory) =>
+        await _fileManager.DownloadFolderToLocalAsync(folderId, destinationDirectory);
 
-    // --- Calendar Categories Tools ---
+    // Calendar Tools
     [McpServerTool, Description("Get all calendar event categories")]
-    public async Task<List<EventCategory>> GetEventCategories()
-    {
-        return await _db.EventCategories.OrderBy(c => c.Name).ToListAsync();
-    }
+    public async Task<List<EventCategory>> GetEventCategories() => await _calendarService.GetCategoriesAsync();
 
     [McpServerTool, Description("Create a new calendar event category")]
-    public async Task<EventCategory> CreateEventCategory(string name, string colorCode)
-    {
-        var category = new EventCategory { Id = Guid.NewGuid(), Name = name, ColorCode = colorCode, CreatedAt = DateTime.UtcNow };
-        _db.EventCategories.Add(category);
-        await _db.SaveChangesAsync();
-        return category;
-    }
+    public async Task<EventCategory> CreateEventCategory(string name, string colorCode) =>
+        await _calendarService.CreateCategoryAsync(name, colorCode);
 
     [McpServerTool, Description("Update an existing calendar event category")]
-    public async Task<EventCategory?> UpdateEventCategory(Guid id, string name, string colorCode)
-    {
-        var category = await _db.EventCategories.FindAsync(id);
-        if (category == null) return null;
-        
-        category.Name = name;
-        category.ColorCode = colorCode;
-        await _db.SaveChangesAsync();
-        return category;
-    }
+    public async Task<EventCategory?> UpdateEventCategory(Guid id, string name, string colorCode) =>
+        await _calendarService.UpdateCategoryAsync(id, name, colorCode);
 
     [McpServerTool, Description("Delete a calendar event category by ID")]
-    public async Task<bool> DeleteEventCategory(Guid id)
-    {
-        var category = await _db.EventCategories.FindAsync(id);
-        if (category == null) return false;
+    public async Task<bool> DeleteEventCategory(Guid id) => await _calendarService.DeleteCategoryAsync(id);
 
-        var events = await _db.CalendarEvents.Where(e => e.CategoryId == id).ToListAsync();
-        foreach (var evt in events)
-        {
-            evt.CategoryId = null;
-        }
-
-        _db.EventCategories.Remove(category);
-        await _db.SaveChangesAsync();
-        return true;
-    }
-
-    // --- Calendar Events Tools ---
     [McpServerTool, Description("Get calendar events optionally filtered by start and end dates")]
-    public async Task<List<CalendarEvent>> GetCalendarEvents(DateTime? start = null, DateTime? end = null)
-    {
-        var query = _db.CalendarEvents
-            .Include(e => e.Category)
-            .Include(e => e.TaskItem)
-            .AsQueryable();
-
-        if (start.HasValue)
-        {
-            query = query.Where(e => (e.EndDate >= start.Value) || e.RecurrenceRule != null);
-        }
-        if (end.HasValue)
-        {
-            query = query.Where(e => (e.StartDate <= end.Value) || e.RecurrenceRule != null);
-        }
-
-        return await query.ToListAsync();
-    }
+    public async Task<List<CalendarEvent>> GetCalendarEvents(DateTime? start = null, DateTime? end = null) =>
+        await _calendarService.GetEventsAsync(start, end);
 
     [McpServerTool, Description("Create a new calendar event")]
-    public async Task<CalendarEvent> CreateCalendarEvent(string title, string? description, DateTime startDate, DateTime endDate, bool isAllDay, string? recurrenceRule, int? notificationPreference, Guid? categoryId, Guid? taskItemId)
-    {
-        var evt = new CalendarEvent
-        {
-            Id = Guid.NewGuid(),
-            Title = title,
-            Description = description,
-            StartDate = startDate,
-            EndDate = endDate,
-            IsAllDay = isAllDay,
-            RecurrenceRule = recurrenceRule,
-            NotificationPreference = notificationPreference,
-            CategoryId = categoryId,
-            TaskItemId = taskItemId,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _db.CalendarEvents.Add(evt);
-
-        if (evt.TaskItemId.HasValue)
-        {
-            var task = await _db.TaskItems.FindAsync(evt.TaskItemId.Value);
-            if (task != null)
-            {
-                task.StartDate = evt.StartDate;
-                task.EndDate = evt.EndDate;
-                task.UpdatedAt = DateTime.UtcNow;
-            }
-        }
-
-        await _db.SaveChangesAsync();
-        
-        return await _db.CalendarEvents
-            .Include(e => e.Category)
-            .Include(e => e.TaskItem)
-            .FirstOrDefaultAsync(e => e.Id == evt.Id) ?? evt;
-    }
+    public async Task<CalendarEvent> CreateCalendarEvent(
+        string title, string? description, DateTime startDate, DateTime endDate, bool isAllDay,
+        string? recurrenceRule, int? notificationPreference, Guid? categoryId, Guid? taskItemId) =>
+        await _calendarService.CreateEventAsync(title, description, startDate, endDate, isAllDay, recurrenceRule, notificationPreference, categoryId, taskItemId);
 
     [McpServerTool, Description("Update an existing calendar event")]
-    public async Task<CalendarEvent?> UpdateCalendarEvent(Guid id, string title, string? description, DateTime startDate, DateTime endDate, bool isAllDay, string? recurrenceRule, int? notificationPreference, Guid? categoryId, Guid? taskItemId)
-    {
-        var evt = await _db.CalendarEvents.FindAsync(id);
-        if (evt == null) return null;
-
-        evt.Title = title;
-        evt.Description = description;
-        evt.StartDate = startDate;
-        evt.EndDate = endDate;
-        evt.IsAllDay = isAllDay;
-        evt.RecurrenceRule = recurrenceRule;
-        evt.NotificationPreference = notificationPreference;
-        evt.CategoryId = categoryId;
-        evt.TaskItemId = taskItemId;
-        evt.UpdatedAt = DateTime.UtcNow;
-
-        if (evt.TaskItemId.HasValue)
-        {
-            var task = await _db.TaskItems.FindAsync(evt.TaskItemId.Value);
-            if (task != null)
-            {
-                task.StartDate = evt.StartDate;
-                task.EndDate = evt.EndDate;
-                task.UpdatedAt = DateTime.UtcNow;
-            }
-        }
-
-        await _db.SaveChangesAsync();
-        
-        return await _db.CalendarEvents
-            .Include(e => e.Category)
-            .Include(e => e.TaskItem)
-            .FirstOrDefaultAsync(e => e.Id == evt.Id) ?? evt;
-    }
+    public async Task<CalendarEvent?> UpdateCalendarEvent(
+        Guid id, string title, string? description, DateTime startDate, DateTime endDate, bool isAllDay,
+        string? recurrenceRule, int? notificationPreference, Guid? categoryId, Guid? taskItemId) =>
+        await _calendarService.UpdateEventAsync(id, title, description, startDate, endDate, isAllDay, recurrenceRule, notificationPreference, categoryId, taskItemId);
 
     [McpServerTool, Description("Delete a calendar event by ID")]
-    public async Task<bool> DeleteCalendarEvent(Guid id)
-    {
-        var evt = await _db.CalendarEvents.FindAsync(id);
-        if (evt == null) return false;
-        
-        if (evt.TaskItemId.HasValue)
-        {
-            var task = await _db.TaskItems.FindAsync(evt.TaskItemId.Value);
-            if (task != null)
-            {
-                task.StartDate = null;
-                task.EndDate = null;
-                task.UpdatedAt = DateTime.UtcNow;
-            }
-        }
+    public async Task<bool> DeleteCalendarEvent(Guid id) => await _calendarService.DeleteEventAsync(id);
 
-        _db.CalendarEvents.Remove(evt);
-        await _db.SaveChangesAsync();
-        return true;
-    }
-
-    // --- Custom Apps Tools ---
+    // Custom Apps Tools
     [McpServerTool, Description("Get all custom apps")]
-    public async Task<List<CustomApp>> GetApps()
-    {
-        return await _db.CustomApps.OrderByDescending(a => a.CreatedAt).ToListAsync();
-    }
+    public async Task<List<CustomApp>> GetApps() => await _appService.GetAppsAsync();
 
     [McpServerTool, Description("Create a new custom app")]
-    public async Task<CustomApp> CreateApp(string name, string htmlContent, string icon, bool showInDashboard, bool isStandalone)
-    {
-        var app = new CustomApp
-        {
-            Id = Guid.NewGuid(),
-            Name = name,
-            HtmlContent = htmlContent,
-            Icon = icon,
-            ShowInDashboard = showInDashboard,
-            IsStandalone = isStandalone,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-        _db.CustomApps.Add(app);
-        await _db.SaveChangesAsync();
-        return app;
-    }
+    public async Task<CustomApp> CreateApp(string name, string htmlContent, string icon, bool showInDashboard, bool isStandalone) =>
+        await _appService.CreateAppAsync(name, htmlContent, icon, showInDashboard, isStandalone);
 
     [McpServerTool, Description("Update an existing custom app")]
-    public async Task<CustomApp?> UpdateApp(Guid id, string name, string htmlContent, string icon, bool showInDashboard, bool isStandalone)
-    {
-        var app = await _db.CustomApps.FindAsync(id);
-        if (app == null) return null;
-
-        app.Name = name;
-        app.HtmlContent = htmlContent;
-        app.Icon = icon;
-        app.ShowInDashboard = showInDashboard;
-        app.IsStandalone = isStandalone;
-        app.UpdatedAt = DateTime.UtcNow;
-
-        await _db.SaveChangesAsync();
-        return app;
-    }
+    public async Task<CustomApp?> UpdateApp(Guid id, string name, string htmlContent, string icon, bool showInDashboard, bool isStandalone) =>
+        await _appService.UpdateAppAsync(id, name, htmlContent, icon, showInDashboard, isStandalone);
 
     [McpServerTool, Description("Delete a custom app by ID")]
-    public async Task<bool> DeleteApp(Guid id)
-    {
-        var app = await _db.CustomApps.FindAsync(id);
-        if (app == null) return false;
-
-        _db.CustomApps.Remove(app);
-        await _db.SaveChangesAsync();
-        return true;
-    }
+    public async Task<bool> DeleteApp(Guid id) => await _appService.DeleteAppAsync(id);
 }

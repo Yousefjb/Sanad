@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Sanad.Api.Data;
 using Sanad.Api.Models;
+using Sanad.Api.Services;
 
 namespace Sanad.Api.Endpoints;
 
@@ -8,157 +9,100 @@ public static class TaskEndpoints
 {
     public static void MapTaskEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/api/tasks", GetTasks);
-        app.MapGet("/api/tasks/{id}", GetTask);
-        app.MapPost("/api/tasks", CreateTask);
-        app.MapPut("/api/tasks/{id}", UpdateTask);
-        app.MapPatch("/api/tasks/{id}/status", UpdateTaskStatus);
-        app.MapPatch("/api/tasks/reorder", ReorderTasks);
-        app.MapPut("/api/tasks/projects/rename", RenameProject);
-        app.MapDelete("/api/tasks/projects/{projectName}", DeleteProject);
-        app.MapDelete("/api/tasks/{id}", DeleteTask);
-        app.MapPost("/api/tasks/{id}/comments", CreateTaskComment);
+        app.MapGet("/api/tasks", (ITaskService svc, string? project, Models.TaskStatus? status, bool? unscheduledOnly) => GetTasks(svc, project, status, unscheduledOnly));
+        app.MapGet("/api/tasks/{id}", (ITaskService svc, Guid id) => GetTask(svc, id));
+        app.MapPost("/api/tasks", (ITaskService svc, TaskItem input) => CreateTask(svc, input));
+        app.MapPut("/api/tasks/{id}", (ITaskService svc, Guid id, TaskItem updated) => UpdateTask(svc, id, updated));
+        app.MapPatch("/api/tasks/{id}/status", (ITaskService svc, Guid id, StatusUpdateRequest req) => UpdateTaskStatus(svc, id, req));
+        app.MapPatch("/api/tasks/reorder", (ITaskService svc, ReorderTasksRequest req) => ReorderTasks(svc, req));
+        app.MapPut("/api/tasks/projects/rename", (ITaskService svc, RenameProjectRequest req) => RenameProject(svc, req));
+        app.MapDelete("/api/tasks/projects/{projectName}", (ITaskService svc, string projectName) => DeleteProject(svc, projectName));
+        app.MapDelete("/api/tasks/{id}", (ITaskService svc, Guid id) => DeleteTask(svc, id));
+        app.MapPost("/api/tasks/{id}/comments", (ITaskService svc, Guid id, TaskComment comment) => CreateTaskComment(svc, id, comment));
         app.MapPost("/api/tasks/{id}/attachments", CreateTaskAttachment);
-        app.MapDelete("/api/tasks/{id}/comments/{commentId}", DeleteTaskComment);
-        app.MapDelete("/api/tasks/{id}/attachments/{attachmentId}", DeleteTaskAttachment);
+        app.MapDelete("/api/tasks/{id}/comments/{commentId}", (ITaskService svc, Guid id, Guid commentId) => DeleteTaskComment(svc, id, commentId));
+        app.MapDelete("/api/tasks/{id}/attachments/{attachmentId}", (ITaskService svc, Guid id, Guid attachmentId) => DeleteTaskAttachment(svc, id, attachmentId));
     }
 
-    public static async Task<IResult> GetTasks(SanadDbContext db, string? project, Models.TaskStatus? status, bool? unscheduledOnly)
+    public static async Task<IResult> GetTasks(ITaskService svc, string? project, Models.TaskStatus? status, bool? unscheduledOnly)
     {
-        var query = db.TaskItems.AsQueryable();
-        if (!string.IsNullOrEmpty(project))
-        {
-            if (project == "__NONE__" || project.Equals("NONE", StringComparison.OrdinalIgnoreCase))
-                query = query.Where(t => string.IsNullOrEmpty(t.Project));
-            else
-                query = query.Where(t => t.Project == project);
-        }
-        if (status.HasValue)
-            query = query.Where(t => t.Status == status.Value);
-            
-        if (unscheduledOnly == true)
-            query = query.Where(t => t.StartDate == null);
-        
-        return Results.Ok(await query.OrderBy(t => t.Order).ThenByDescending(t => t.CreatedAt).ToListAsync());
+        var tasks = await svc.GetTasksAsync(project, status, unscheduledOnly);
+        return Results.Ok(tasks);
     }
 
-    public static async Task<IResult> GetTask(SanadDbContext db, Guid id)
+    public static Task<IResult> GetTasks(SanadDbContext db, string? project, Models.TaskStatus? status, bool? unscheduledOnly) =>
+        GetTasks(new TaskService(db, null!, null!), project, status, unscheduledOnly);
+
+    public static async Task<IResult> GetTask(ITaskService svc, Guid id)
     {
-        var task = await db.TaskItems
-            .Include(t => t.Comments.OrderBy(c => c.CreatedAt))
-            .Include(t => t.Attachments)
-            .AsNoTracking()
-            .FirstOrDefaultAsync(t => t.Id == id);
-            
+        var task = await svc.GetTaskDetailsAsync(id);
         if (task == null) return Results.NotFound();
-        
         return Results.Ok(new { Task = task, Comments = task.Comments, Attachments = task.Attachments });
     }
 
-    public static async Task<IResult> CreateTask(SanadDbContext db, TaskItem input)
+    public static Task<IResult> GetTask(SanadDbContext db, Guid id) =>
+        GetTask(new TaskService(db, null!, null!), id);
+
+    public static async Task<IResult> CreateTask(ITaskService svc, TaskItem input)
     {
         if (string.IsNullOrWhiteSpace(input.Title)) return Results.BadRequest("Title is required");
-
-        db.TaskItems.Add(input);
-        
-        await db.SaveChangesAsync();
-        return Results.Created($"/api/tasks/{input.Id}", input);
+        var task = await svc.CreateTaskAsync(input);
+        return Results.Created($"/api/tasks/{task.Id}", task);
     }
 
-    public static async Task<IResult> UpdateTask(SanadDbContext db, Guid id, TaskItem updatedTask)
+    public static Task<IResult> CreateTask(SanadDbContext db, TaskItem input) =>
+        CreateTask(new TaskService(db, null!, null!), input);
+
+    public static async Task<IResult> UpdateTask(ITaskService svc, Guid id, TaskItem updatedTask)
     {
         if (string.IsNullOrWhiteSpace(updatedTask.Title)) return Results.BadRequest("Title is required");
-
-        var task = await db.TaskItems.FindAsync(id);
+        var task = await svc.UpdateTaskAsync(id, updatedTask);
         if (task == null) return Results.NotFound();
-        
-        task.Title = updatedTask.Title;
-        task.Content = updatedTask.Content;
-        task.Status = updatedTask.Status;
-        task.Tags = updatedTask.Tags;
-        task.Project = updatedTask.Project;
-        task.EstimatedMinutes = updatedTask.EstimatedMinutes;
-        task.StartDate = updatedTask.StartDate;
-        task.EndDate = updatedTask.EndDate;
-        task.UpdatedAt = DateTime.UtcNow;
-        
-        await db.SaveChangesAsync();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> UpdateTaskStatus(SanadDbContext db, Guid id, StatusUpdateRequest request)
+    public static Task<IResult> UpdateTask(SanadDbContext db, Guid id, TaskItem updatedTask) =>
+        UpdateTask(new TaskService(db, null!, null!), id, updatedTask);
+
+    public static async Task<IResult> UpdateTaskStatus(ITaskService svc, Guid id, StatusUpdateRequest request)
     {
-        var task = await db.TaskItems.FindAsync(id);
-        if (task == null) return Results.NotFound();
-        task.Status = request.Status;
-        task.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
+        var success = await svc.UpdateTaskStatusAsync(id, request.Status);
+        if (!success) return Results.NotFound();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> ReorderTasks(SanadDbContext db, ReorderTasksRequest request)
+    public static Task<IResult> UpdateTaskStatus(SanadDbContext db, Guid id, StatusUpdateRequest request) =>
+        UpdateTaskStatus(new TaskService(db, null!, null!), id, request);
+
+    public static async Task<IResult> ReorderTasks(ITaskService svc, ReorderTasksRequest request)
     {
-        var ids = request.Tasks.Select(t => t.Id).ToList();
-        var tasks = await db.TaskItems.Where(t => ids.Contains(t.Id)).ToListAsync();
-        
-        foreach (var update in request.Tasks)
-        {
-            var task = tasks.FirstOrDefault(t => t.Id == update.Id);
-            if (task != null)
-            {
-                task.Status = update.Status;
-                task.Order = update.Order;
-                task.UpdatedAt = DateTime.UtcNow;
-            }
-        }
-        
-        await db.SaveChangesAsync();
+        await svc.ReorderTasksAsync(request.Tasks);
         return Results.NoContent();
     }
 
-    public static async Task<IResult> DeleteTask(SanadDbContext db, Guid id, Services.ITenantProvider tenantProvider)
+    public static Task<IResult> ReorderTasks(SanadDbContext db, ReorderTasksRequest request) =>
+        ReorderTasks(new TaskService(db, null!, null!), request);
+
+    public static async Task<IResult> DeleteTask(ITaskService svc, Guid id)
     {
-        var task = await db.TaskItems
-            .Include(t => t.Attachments)
-            .FirstOrDefaultAsync(t => t.Id == id);
-            
-        if (task == null) return Results.NotFound();
-        
-        var filesToDelete = new List<string>();
-        var username = tenantProvider.GetUsername();
-        
-        if (task.Attachments != null)
-        {
-            foreach (var attachment in task.Attachments)
-            {
-                var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Data", username, attachment.FilePath.TrimStart('/'));
-                filesToDelete.Add(filePath);
-            }
-        }
-
-        // Delete inline images
-        filesToDelete.AddRange(Utils.UploadHelper.GetAttachmentPathsFromHtml(task.Content, username));
-        
-        db.TaskItems.Remove(task);
-        await db.SaveChangesAsync();
-
-        Utils.UploadHelper.DeleteFiles(filesToDelete);
-
+        var success = await svc.DeleteTaskAsync(id);
+        if (!success) return Results.NotFound();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> CreateTaskComment(SanadDbContext db, Guid id, TaskComment comment)
-    {
-        var taskExists = await db.TaskItems.AnyAsync(t => t.Id == id);
-        if (!taskExists) return Results.NotFound();
+    public static Task<IResult> DeleteTask(SanadDbContext db, Guid id, Services.ITenantProvider tenantProvider) =>
+        DeleteTask(new TaskService(db, tenantProvider, null!), id);
 
+    public static async Task<IResult> CreateTaskComment(ITaskService svc, Guid id, TaskComment comment)
+    {
         if (string.IsNullOrWhiteSpace(comment.Text)) return Results.BadRequest("Comment text is required");
-
-        comment.TaskItemId = id;
-        db.TaskComments.Add(comment);
-        await db.SaveChangesAsync();
-        return Results.Created($"/api/tasks/{id}/comments/{comment.Id}", comment);
+        var created = await svc.AddCommentAsync(id, comment.Text);
+        if (created == null) return Results.NotFound();
+        return Results.Created($"/api/tasks/{id}/comments/{created.Id}", created);
     }
+
+    public static Task<IResult> CreateTaskComment(SanadDbContext db, Guid id, TaskComment comment) =>
+        CreateTaskComment(new TaskService(db, null!, null!), id, comment);
 
     public static async Task<IResult> CreateTaskAttachment(HttpRequest request, SanadDbContext db, Guid id, Services.ITenantProvider tenantProvider, Services.DiskQuotaService quotaService)
     {
@@ -180,75 +124,51 @@ public static class TaskEndpoints
         return Results.Created($"/api/tasks/{id}/attachments/{attachment.Id}", attachment);
     }
 
-    public static async Task<IResult> DeleteTaskComment(SanadDbContext db, Guid id, Guid commentId)
+    public static async Task<IResult> DeleteTaskComment(ITaskService svc, Guid id, Guid commentId)
     {
-        var comment = await db.TaskComments.FirstOrDefaultAsync(c => c.Id == commentId && c.TaskItemId == id);
-        if (comment == null) return Results.NotFound();
-        
-        db.TaskComments.Remove(comment);
-        await db.SaveChangesAsync();
+        var success = await svc.DeleteCommentAsync(id, commentId);
+        if (!success) return Results.NotFound();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> DeleteTaskAttachment(SanadDbContext db, Guid id, Guid attachmentId, Sanad.Api.Services.ITenantProvider tenantProvider)
+    public static Task<IResult> DeleteTaskComment(SanadDbContext db, Guid id, Guid commentId) =>
+        DeleteTaskComment(new TaskService(db, null!, null!), id, commentId);
+
+    public static async Task<IResult> DeleteTaskAttachment(ITaskService svc, Guid id, Guid attachmentId)
     {
-        var attachment = await db.TaskAttachments.FirstOrDefaultAsync(a => a.Id == attachmentId && a.TaskItemId == id);
-        if (attachment == null) return Results.NotFound();
-
-        var username = tenantProvider.GetUsername();
-        var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Data", username, attachment.FilePath.TrimStart('/'));
-        
-        db.TaskAttachments.Remove(attachment);
-        await db.SaveChangesAsync();
-
-        try
-        {
-            File.Delete(filePath);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error deleting file {filePath}: {ex.Message}");
-        }
-
+        var success = await svc.DeleteAttachmentAsync(id, attachmentId);
+        if (!success) return Results.NotFound();
         return Results.NoContent();
     }
 
-    public static async Task<IResult> RenameProject(SanadDbContext db, RenameProjectRequest request)
+    public static Task<IResult> DeleteTaskAttachment(SanadDbContext db, Guid id, Guid attachmentId, Services.ITenantProvider tenantProvider) =>
+        DeleteTaskAttachment(new TaskService(db, tenantProvider, null!), id, attachmentId);
+
+    public static async Task<IResult> RenameProject(ITaskService svc, RenameProjectRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.OldName) || string.IsNullOrWhiteSpace(request.NewName))
             return Results.BadRequest("Old and new project names are required");
 
-        var tasks = await db.TaskItems.Where(t => t.Project == request.OldName).ToListAsync();
-        foreach(var task in tasks)
-        {
-            task.Project = request.NewName.Trim();
-            task.UpdatedAt = DateTime.UtcNow;
-        }
-        
-        await db.SaveChangesAsync();
+        await svc.RenameProjectAsync(request.OldName, request.NewName);
         return Results.NoContent();
     }
 
-    public static async Task<IResult> DeleteProject(SanadDbContext db, string projectName)
+    public static Task<IResult> RenameProject(SanadDbContext db, RenameProjectRequest request) =>
+        RenameProject(new TaskService(db, null!, null!), request);
+
+    public static async Task<IResult> DeleteProject(ITaskService svc, string projectName)
     {
         if (string.IsNullOrWhiteSpace(projectName))
             return Results.BadRequest("Project name is required");
 
-        var tasks = await db.TaskItems.Where(t => t.Project == projectName).ToListAsync();
-        foreach(var task in tasks)
-        {
-            task.Project = null;
-            task.UpdatedAt = DateTime.UtcNow;
-        }
-
-        await db.SaveChangesAsync();
+        await svc.DeleteProjectAsync(projectName);
         return Results.NoContent();
     }
+
+    public static Task<IResult> DeleteProject(SanadDbContext db, string projectName) =>
+        DeleteProject(new TaskService(db, null!, null!), projectName);
 }
 
 public record RenameProjectRequest(string OldName, string NewName);
-
 public record StatusUpdateRequest(Models.TaskStatus Status);
-
 public record ReorderTasksRequest(List<TaskUpdateDto> Tasks);
-public record TaskUpdateDto(Guid Id, Models.TaskStatus Status, int Order);
